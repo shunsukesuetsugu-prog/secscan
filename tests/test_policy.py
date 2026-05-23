@@ -165,6 +165,53 @@ def test_unknown_with_ignore_policy_does_not_contribute() -> None:
     assert decision.crossing_findings == ()
 
 
+def test_fail_on_never_overrides_unknown_fail_policy() -> None:
+    """Codex 15th review: ``--fail-on=none`` (= Severity.NEVER) must
+    GUARANTEE exit 0 — including for UNKNOWN findings whose unknown
+    policy is "fail". Previously the "fail" branch upgraded UNKNOWN to
+    ``config.fail_on`` (=NEVER), and ``NEVER >= NEVER`` was True, so
+    the finding crossed the threshold and the run exited 1. Pin the
+    contract: when threshold is NEVER, NOTHING crosses."""
+    rr = RunResult(
+        findings=(
+            _finding(severity=Severity.UNKNOWN, scanner="secrets"),
+            _finding(severity=Severity.CRITICAL, fingerprint="c"),
+        )
+    )
+    cfg = _config(
+        fail_on=Severity.NEVER,
+        unknown=UnknownSeverityPolicy(secrets="fail"),
+    )
+    decision = evaluate(rr, cfg)
+    assert decision.exit_code == ExitCode.OK
+    assert decision.crossing_findings == ()
+
+
+def test_fail_on_never_still_propagates_scanner_errors() -> None:
+    """The 'never' threshold still does not mask scanner errors —
+    inconclusive scans remain exit 2 regardless of fail-on."""
+    rr = RunResult(errors=(ScannerError(scanner="x", reason="r"),))
+    cfg = _config(fail_on=Severity.NEVER)
+    decision = evaluate(rr, cfg)
+    assert decision.exit_code == ExitCode.SCAN_ERROR
+
+
+def test_fail_on_never_still_counts_unknown_warnings_for_display() -> None:
+    """The display footer should still show how many UNKNOWN findings
+    the deps scanner produced even though the threshold accepts them."""
+    rr = RunResult(
+        findings=(
+            _finding(scanner="deps", severity=Severity.UNKNOWN, fingerprint="d"),
+        )
+    )
+    cfg = _config(
+        fail_on=Severity.NEVER,
+        unknown=UnknownSeverityPolicy(deps="warn"),
+    )
+    decision = evaluate(rr, cfg)
+    assert decision.unknown_warning_count == 1
+
+
 def test_unknown_policy_is_per_scanner() -> None:
     # secrets=fail, deps=warn → deps UNKNOWN doesn't trigger but secrets does.
     secrets_unknown = _finding(scanner="secrets", severity=Severity.UNKNOWN, fingerprint="s")

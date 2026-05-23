@@ -71,10 +71,34 @@ def apply_overrides(findings: tuple[Finding, ...], config: ProjectConfig) -> tup
 
 
 def evaluate(result: RunResult, config: ProjectConfig) -> PolicyDecision:
-    """Compute the final exit code for a RunResult."""
+    """Compute the final exit code for a RunResult.
+
+    ``threshold == Severity.NEVER`` (the ``--fail-on=none`` alias) means
+    "never fail on findings" — no severity, including UNKNOWN under
+    ``severity_unknown_policy="fail"``, can cross it. Codex 15th review
+    flagged that the previous "fail" branch upgraded UNKNOWN to
+    ``config.fail_on``, making ``NEVER >= NEVER`` true and producing a
+    contract-violating exit 1.
+    """
     threshold = config.fail_on
     crossing: list[Finding] = []
     unknown_warns = 0
+
+    if threshold == Severity.NEVER:
+        # Walk findings only to count UNKNOWN-warn entries for the display
+        # footer; nothing can cross.
+        for finding in result.findings:
+            if finding.severity == Severity.UNKNOWN:
+                policy = config.severity_unknown_policy.for_scanner(finding.scanner)
+                if policy == "warn":
+                    unknown_warns += 1
+        exit_code = ExitCode.SCAN_ERROR if result.has_errors else ExitCode.OK
+        return PolicyDecision(
+            exit_code=exit_code,
+            threshold=threshold,
+            crossing_findings=(),
+            unknown_warning_count=unknown_warns,
+        )
 
     for finding in result.findings:
         effective = _effective_severity_for_policy(finding, config)

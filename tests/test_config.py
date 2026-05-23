@@ -68,7 +68,6 @@ def test_parses_full_config(tmp_path: Path) -> None:
 [scan]
 fail_on = "critical"
 skip = ["sast"]
-timeout_seconds = 60
 
 [scan.severity_unknown_policy]
 deps = "fail"
@@ -103,7 +102,6 @@ default_expiry_days = 30
     cfg = load_config_file(p)
     assert cfg.fail_on == Severity.CRITICAL
     assert cfg.skip == ("sast",)
-    assert cfg.timeout_seconds == 60
     assert cfg.severity_unknown_policy.deps == "fail"
     assert cfg.severity_unknown_policy.sast == "ignore"
     assert cfg.severity_unknown_policy.secrets == "warn"
@@ -187,9 +185,17 @@ def test_skip_unknown_scanner_rejected(tmp_path: Path) -> None:
         load_config_file(_write(tmp_path, "[scan]\nskip = ['dast']\n"))
 
 
-def test_timeout_must_be_positive(tmp_path: Path) -> None:
+def test_scan_timeout_seconds_is_rejected(tmp_path: Path) -> None:
+    """Codex 15th review: there is no whole-run timeout; setting
+    ``scan.timeout_seconds`` previously stored the value but did nothing.
+    We now reject it loudly so users notice the misconfiguration."""
+    with pytest.raises(ConfigError, match=r"\[scan\] unknown keys"):
+        load_config_file(_write(tmp_path, "[scan]\ntimeout_seconds = 60\n"))
+
+
+def test_per_scanner_timeout_must_be_positive(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="must be >="):
-        load_config_file(_write(tmp_path, "[scan]\ntimeout_seconds = 0\n"))
+        load_config_file(_write(tmp_path, "[deps]\ntimeout_seconds = 0\n"))
 
 
 def test_semgrep_config_must_be_list(tmp_path: Path) -> None:

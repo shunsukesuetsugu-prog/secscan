@@ -116,7 +116,8 @@ Drop a `.secscan.toml` at the project root. secscan also walks parents.
 [scan]
 fail_on = "high"               # critical | high | medium | low | none
 skip = []                      # e.g. ["sast"] to skip a scanner in `all`
-timeout_seconds = 1800         # whole-run cap
+# Per-scanner timeouts live under [deps] / [sast] / [secrets] — there is
+# no whole-run timeout in MVP.
 
 [scan.severity_unknown_policy]
 # How findings with severity=UNKNOWN are treated, per scanner:

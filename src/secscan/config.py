@@ -29,7 +29,6 @@ class ConfigError(ValueError):
 # --- Defaults --------------------------------------------------------------
 
 DEFAULT_FAIL_ON: Severity = Severity.HIGH
-DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_DEPS_TIMEOUT = 300
 DEFAULT_SAST_TIMEOUT = 900
 DEFAULT_SECRETS_TIMEOUT = 300
@@ -101,7 +100,6 @@ class BaselineConfig:
 class ProjectConfig:
     fail_on: Severity = DEFAULT_FAIL_ON
     skip: tuple[str, ...] = ()
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     severity_unknown_policy: UnknownSeverityPolicy = field(default_factory=UnknownSeverityPolicy)
     deps: DepsConfig = field(default_factory=DepsConfig)
     sast: SastConfig = field(default_factory=SastConfig)
@@ -176,7 +174,6 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
     return ProjectConfig(
         fail_on=cfg.fail_on,
         skip=cfg.skip,
-        timeout_seconds=cfg.timeout_seconds,
         severity_unknown_policy=cfg.severity_unknown_policy,
         deps=cfg.deps,
         sast=cfg.sast,
@@ -279,9 +276,15 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     )
 
     # [scan] keys
+    # Note: ``scan.timeout_seconds`` is intentionally NOT a recognized key.
+    # Codex 15th review flagged the previous incarnation as misleading —
+    # it was parsed and stored but no code path enforced a whole-run
+    # deadline (only per-scanner timeouts are honored). Better to reject
+    # the key loudly so users who set it notice it isn't doing anything,
+    # than to accept it silently.
     _reject_unknown(
         scan,
-        {"fail_on", "skip", "timeout_seconds", "severity_unknown_policy"},
+        {"fail_on", "skip", "severity_unknown_policy"},
         "scan",
     )
     fail_on = _parse_severity(
@@ -291,11 +294,6 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     for s in skip:
         if s not in _VALID_SCANNERS:
             raise ConfigError(f"scan.skip: unknown scanner {s!r}")
-    timeout = _require_int(
-        scan.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
-        "scan.timeout_seconds",
-        minimum=1,
-    )
     unknown_policy = _parse_unknown_policy(
         _require_table(scan.get("severity_unknown_policy"), "scan.severity_unknown_policy")
     )
@@ -303,7 +301,6 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     return ProjectConfig(
         fail_on=fail_on,
         skip=tuple(skip),
-        timeout_seconds=timeout,
         severity_unknown_policy=unknown_policy,
         deps=deps,
         sast=sast,
