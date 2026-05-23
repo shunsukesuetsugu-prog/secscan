@@ -258,28 +258,12 @@ def test_no_baseline_disables_baseline(
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Write a baseline that would suppress everything by fingerprint…
-    secscan_dir = project / ".secscan"
-    secscan_dir.mkdir()
-    leak_fp = _expected_secrets_fingerprint("x", "a.py", 1, 1)
-    save_baseline(
-        Baseline(
-            entries=(
-                BaselineEntry(
-                    fingerprint=leak_fp,
-                    scanner="secrets",
-                    rule_id="x",
-                    reason="REQUIRED",
-                    accepted_by="alice",
-                    added_at=datetime(2026, 1, 1, tzinfo=UTC),
-                    expires_at=datetime(2099, 1, 1, tzinfo=UTC),
-                    secscan_version=SECSCAN_VERSION,
-                ),
-            )
-        ),
-        secscan_dir / "baseline.json",
-    )
-
+    # Drive the test end-to-end instead of recomputing the secrets-scanner
+    # fingerprint formula by hand (which would couple the test to a
+    # private implementation detail). Steps:
+    #   1. Run accept --all to populate the baseline from a real scan.
+    #   2. Rerun: baseline should suppress -> OK.
+    #   3. Rerun with --no-baseline: same finding -> FINDINGS.
     leak = json.dumps(
         [
             {
@@ -293,15 +277,32 @@ def test_no_baseline_disables_baseline(
             }
         ]
     ).encode()
+
+    # 1) accept the finding.
     scripted_runner.queue(returncode=101, stdout=leak)
     scripted_runner.queue(returncode=0, stdout=b"")
+    rc_accept = cli.main(
+        [
+            "baseline",
+            "accept",
+            "--path",
+            str(project),
+            "--all",
+            "--reason",
+            "test fixture",
+        ]
+    )
+    capsys.readouterr()
+    assert rc_accept == int(ExitCode.OK)
 
-    # WITHOUT --no-baseline: baseline suppresses; exit OK.
+    # 2) baseline suppresses → OK.
+    scripted_runner.queue(returncode=101, stdout=leak)
+    scripted_runner.queue(returncode=0, stdout=b"")
     rc1 = cli.main(["secrets", "--path", str(project)])
     capsys.readouterr()
     assert rc1 == int(ExitCode.OK)
 
-    # Reset and rerun WITH --no-baseline: suppression skipped; exit FINDINGS.
+    # 3) --no-baseline → FINDINGS.
     scripted_runner.queue(returncode=101, stdout=leak)
     scripted_runner.queue(returncode=0, stdout=b"")
     rc2 = cli.main(["secrets", "--path", str(project), "--no-baseline"])
@@ -559,22 +560,99 @@ def test_finding_title_is_redacted_not_raw_description(
     assert "[REDACTED]" in out
 
 
-# --- Helpers ---------------------------------------------------------------
+def test_scan_reports_malformed_config_as_scan_error(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A typo'd or otherwise invalid .secscan.toml must fail closed —
+    # NEVER silently ignored. Codex 3rd review flagged silent config
+    # acceptance as a path to disable severity_overrides etc.
+    (project / ".secscan.toml").write_text("[scan]\nfail_on = 'super-high'\n")
+    rc = cli.main(["secrets", "--path", str(project)])
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "config error" in captured.err
 
 
-def _expected_secrets_fingerprint(rule_id: str, rel_file: str, line: int, col: int) -> str:
-    """Recompute the secrets-scanner composite fingerprint for assertions."""
-    import hashlib
+def test_scan_reports_malformed_baseline_as_scan_error(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A malformed baseline must fail closed: otherwise tampering with the
+    # baseline file (e.g. shipping invalid JSON) could quietly disable
+    # suppression OR be used to attempt parser exploits.
+    secscan_dir = project / ".secscan"
+    secscan_dir.mkdir()
+    (secscan_dir / "baseline.json").write_text("{not valid json")
+    rc = cli.main(["secrets", "--path", str(project)])
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    # The error path goes through the orchestrator -> CLI's BaselineError
+    # catch; just verify the user sees a baseline message.
+    assert "baseline" in captured.err.lower()
 
-    return hashlib.sha256(
-        "\x00".join((rule_id, rel_file, str(line), str(col))).encode("utf-8")
-    ).hexdigest()
 
-
-def test_helper_matches_scanner_fingerprint() -> None:
-    """Guard: if the secrets fingerprint formula changes, this fails too."""
-    from secscan.scanners.secrets import _composite_fingerprint  # type: ignore[attr-defined]
-
-    assert _expected_secrets_fingerprint("x", "a.py", 1, 2) == _composite_fingerprint(
-        "x", "a.py", 1, 2
+def test_baseline_accept_rejects_unknown_fingerprint(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # accept --fingerprint must refuse fingerprints that don't appear in
+    # the current scan output: otherwise users could accept arbitrary
+    # strings, polluting the baseline with entries that suppress nothing
+    # (and look the same as ones that DO suppress).
+    monkeypatch.delenv("SECSCAN_CI", raising=False)
+    leak = json.dumps(
+        [
+            {
+                "RuleID": "leaking-rule",
+                "Description": "leak",
+                "StartLine": 5,
+                "StartColumn": 1,
+                "File": "src/x.py",
+                "Secret": "REDACTED",
+                "Match": "REDACTED",
+            }
+        ]
+    ).encode()
+    scripted_runner.queue(returncode=101, stdout=leak)
+    scripted_runner.queue(returncode=0, stdout=b"")
+    rc = cli.main(
+        [
+            "baseline",
+            "accept",
+            "--path",
+            str(project),
+            "--fingerprint",
+            "deadbeefdeadbeef",  # not present in current findings
+            "--reason",
+            "trying to fool accept",
+        ]
     )
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "not present" in captured.err.lower()
+
+
+def test_baseline_list_rejects_malformed_baseline(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secscan_dir = project / ".secscan"
+    secscan_dir.mkdir()
+    (secscan_dir / "baseline.json").write_text(
+        json.dumps({"version": 99, "entries": []})
+    )
+    rc = cli.main(["baseline", "list", "--path", str(project)])
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "baseline error" in captured.err
+
+
+# Note: the previous version of this file carried a hand-recomputed copy
+# of the secrets-scanner fingerprint formula and a "guard" test pinning the
+# two together. That coupled the test suite to a private implementation
+# detail; ``test_no_baseline_disables_baseline`` now drives accept-then-
+# rerun end-to-end instead.

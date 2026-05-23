@@ -195,6 +195,45 @@ def test_apply_baseline_suppresses_matching_fingerprint() -> None:
     assert app.suppressed[0].fingerprint == "fp1"
 
 
+def test_apply_baseline_requires_scanner_and_rule_id_match() -> None:
+    # Codex 3rd review demanded suppression on the full (fingerprint,
+    # scanner, rule_id) tuple, not fingerprint alone. A cross-scanner or
+    # cross-rule collision must NOT silence a finding.
+    # _entry() defaults: scanner="secrets", rule_id="aws-key"
+    bl = Baseline(entries=(_entry(fingerprint="shared-fp"),))
+
+    # Same fingerprint but different scanner: must NOT be suppressed.
+    cross_scanner = Finding(
+        scanner="deps",
+        rule_id="aws-key",
+        severity=Severity.HIGH,
+        title="t",
+        message="m",
+        location=Location(file="x.py", line=1),
+        fingerprint="shared-fp",
+        raw_fingerprint="raw1",
+    )
+    # Same fingerprint but different rule_id: must NOT be suppressed.
+    cross_rule = Finding(
+        scanner="secrets",
+        rule_id="github-pat",
+        severity=Severity.HIGH,
+        title="t",
+        message="m",
+        location=Location(file="x.py", line=1),
+        fingerprint="shared-fp",
+        raw_fingerprint="raw1",
+    )
+    # Exact triple match: SHOULD be suppressed.
+    exact_match = _finding("shared-fp")  # scanner="secrets", rule_id="aws-key"
+
+    app = apply_baseline((cross_scanner, cross_rule, exact_match), bl)
+    suppressed_fingerprints = {f.scanner + ":" + f.rule_id for f in app.suppressed}
+    assert suppressed_fingerprints == {"secrets:aws-key"}
+    kept_pairs = {f.scanner + ":" + f.rule_id for f in app.kept}
+    assert kept_pairs == {"deps:aws-key", "secrets:github-pat"}
+
+
 def test_apply_baseline_expired_entry_does_not_suppress() -> None:
     past = datetime(2025, 1, 1, tzinfo=UTC)
     bl = Baseline(

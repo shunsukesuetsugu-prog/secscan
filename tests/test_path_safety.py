@@ -91,6 +91,24 @@ def test_contains_rejects_parent(tmp_path: Path) -> None:
     assert not root.contains(tmp_path)  # parent of root
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics")
+def test_contains_rejects_symlink_escape(tmp_path: Path) -> None:
+    # A symlink inside the scan root that points outside must not appear to
+    # "contain" the target. Otherwise a scanner / malicious project could
+    # follow the link to read host files we never agreed to scan.
+    inside = tmp_path / "project"
+    inside.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x")
+    link = inside / "shortcut"
+    link.symlink_to(outside, target_is_directory=True)
+    root = resolve_scan_root(inside)
+    # The link itself resolves to the outside dir; both the link and any
+    # path "below" it must be rejected.
+    assert not root.contains(link / "secret.txt")
+
+
 # --- ResolvedRoot.is_ignored -----------------------------------------------
 
 

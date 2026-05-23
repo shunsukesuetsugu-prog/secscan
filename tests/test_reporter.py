@@ -117,7 +117,7 @@ def test_unknown_warning_count_shown_when_present() -> None:
     assert "not counted toward fail-on" in out_deps
 
 
-def test_errors_section_shows_reason_and_redacted_excerpt() -> None:
+def test_errors_section_shows_reason_and_excerpt() -> None:
     rr = RunResult(
         errors=(
             ScannerError(
@@ -136,6 +136,27 @@ def test_errors_section_shows_reason_and_redacted_excerpt() -> None:
     assert "something broke" in out
     # Errors must drive the exit code to SCAN_ERROR even with no findings.
     assert f"exit code: {int(ExitCode.SCAN_ERROR)}" in out
+
+
+def test_errors_section_does_not_unredact_excerpt() -> None:
+    """Reporter must render whatever excerpt it's given verbatim — it is
+    NOT responsible for re-redacting. But this test pins a closely-related
+    invariant: a redacted excerpt with [REDACTED] in it must be displayed
+    as such; the reporter must not strip or expand the token in a way that
+    could be misleading."""
+    rr = RunResult(
+        errors=(
+            ScannerError(
+                scanner="secrets",
+                reason="gitleaks exited with 2",
+                stderr_excerpt="error processing [REDACTED] in repo",
+                returncode=2,
+            ),
+        )
+    )
+    decision = evaluate(rr, ProjectConfig())
+    out = render_report(rr, decision)
+    assert "[REDACTED]" in out
 
 
 def test_warnings_render_with_marker() -> None:

@@ -111,6 +111,29 @@ def test_path_outside_root_is_stripped(tmp_path: Path, runner: CommandRunner) ->
     assert kept.location.line is None
 
 
+def test_absolute_outside_path_is_stripped(
+    tmp_path: Path, runner: CommandRunner
+) -> None:
+    # An absolute path to a real host file (/etc/passwd / /tmp/...) must
+    # also be stripped — not just relative `..` escapes. The orchestrator
+    # treats the scan-root boundary as authoritative regardless of how the
+    # scanner expressed the path.
+    finding = _finding_with_path("/etc/passwd")
+    scanner = _FakeScanner(outcome=ScanOutcome(scanner="secrets", findings=(finding,)))
+    out = run_scanners(
+        [scanner],
+        scan_root=resolve_scan_root(tmp_path),
+        config=ProjectConfig(),
+        runner=runner,
+    )
+    (kept,) = out.result.findings
+    assert kept.location is not None
+    assert kept.location.file is None
+    # Equally important: nothing in the rendered report should reveal the
+    # absolute path the scanner reported.
+    assert kept.location.line is None
+
+
 def test_path_in_ignored_dir_is_stripped(
     tmp_path: Path, runner: CommandRunner
 ) -> None:

@@ -67,6 +67,7 @@ class FakeScanner(Scanner):
     raise_exception: BaseException | None = None
     applicable: bool = True
     calls: list[WorkUnit] = field(default_factory=list)
+    received_configs: list[ScanConfig] = field(default_factory=list)
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         return self.applicable
@@ -78,6 +79,7 @@ class FakeScanner(Scanner):
         config: ScanConfig,
     ) -> ScanOutcome:
         self.calls.append(unit)
+        self.received_configs.append(config)
         if self.raise_tool_not_found:
             raise ToolNotFoundError(self.tool_executable, self.install_hint)
         if self.raise_exception is not None:
@@ -388,6 +390,81 @@ def test_severity_overrides_applied_before_policy(
         runner=runner,
     )
     assert out.decision.exit_code == ExitCode.FINDINGS
+
+
+def test_orchestrator_passes_scanner_specific_scan_config(
+    tmp_path: Path, runner: CommandRunner
+) -> None:
+    """Per-scanner timeouts and ``extra`` keys must reach the scanner.
+
+    The orchestrator builds a ScanConfig from ProjectConfig before each
+    Scanner.scan() call. A silent regression that hardcoded defaults or
+    used the wrong section would leave deps/sast/secrets running with
+    incorrect budgets, so we pin the routing here.
+    """
+    from secscan.config import (
+        BaselineConfig,
+        DepsConfig,
+        SastConfig,
+        SecretsConfig,
+    )
+
+    (tmp_path / "package.json").write_text("{}")  # so deps Discovery yields a unit
+    secrets = FakeSecretsScanner(outcome=ScanOutcome(scanner="secrets"))
+    sast = FakeSastScanner(outcome=ScanOutcome(scanner="sast"))
+    deps = FakeDepsScanner(outcome=ScanOutcome(scanner="deps"))
+
+    cfg = ProjectConfig(
+        deps=DepsConfig(
+            allow_missing_lockfile=True,
+            ignore_dev_dependencies=True,
+            timeout_seconds=11,
+        ),
+        sast=SastConfig(
+            semgrep_config=("p/custom",),
+            timeout_seconds=22,
+        ),
+        secrets=SecretsConfig(timeout_seconds=33),
+        baseline=BaselineConfig(
+            path=tmp_path / ".secscan" / "baseline.json",
+            default_expiry_days=90,
+        ),
+    )
+
+    run_scanners(
+        [secrets, sast, deps],
+        scan_root=resolve_scan_root(tmp_path),
+        config=cfg,
+        runner=runner,
+    )
+
+    (secrets_cfg,) = secrets.received_configs
+    (sast_cfg,) = sast.received_configs
+    (deps_cfg,) = deps.received_configs
+    assert secrets_cfg.timeout_seconds == 33
+    assert sast_cfg.timeout_seconds == 22
+    assert sast_cfg.extra["semgrep_config"] == ("p/custom",)
+    assert deps_cfg.timeout_seconds == 11
+    assert deps_cfg.extra["allow_missing_lockfile"] is True
+    assert deps_cfg.extra["ignore_dev_dependencies"] is True
+
+
+def test_orchestrator_scan_config_extra_is_immutable(
+    tmp_path: Path, runner: CommandRunner
+) -> None:
+    """The ``extra`` mapping the orchestrator hands a scanner must be
+    immutable. A scanner mutating it would leak state into the next
+    invocation (Codex 4th review)."""
+    sast = FakeSastScanner(outcome=ScanOutcome(scanner="sast"))
+    run_scanners(
+        [sast],
+        scan_root=resolve_scan_root(tmp_path),
+        config=ProjectConfig(),
+        runner=runner,
+    )
+    (cfg,) = sast.received_configs
+    with pytest.raises(TypeError):
+        cfg.extra["sneaky"] = "value"  # type: ignore[index]
 
 
 def test_unknown_severity_policy_respected(
