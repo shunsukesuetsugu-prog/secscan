@@ -31,7 +31,12 @@ from typing import Any
 
 from ...models import Finding, Location
 from ...runner import CommandResult, decode_output
-from ._common import AdvisoryHints, deps_fingerprint, severity_from_npm_label
+from ._common import (
+    AdvisoryHints,
+    deps_fingerprint,
+    select_advisory_id,
+    severity_from_npm_label,
+)
 
 
 def yarn_audit_argv(*, workspace_id: str) -> tuple[str, ...]:
@@ -191,13 +196,7 @@ def _append_from_advisory(
 def _hints_from_advisory(
     advisory: dict[str, Any], *, fallback_id: str
 ) -> AdvisoryHints | None:
-    advisory_id = (
-        _first_str(advisory.get("ghsa_id"))
-        or _first_str(advisory.get("id"))
-        or _first_str(advisory.get("url"))
-        or _first_cve(advisory.get("cves"))
-        or fallback_id
-    )
+    advisory_id = select_advisory_id(advisory, fallback=fallback_id)
     if not advisory_id:
         return None
     cve = _first_cve(advisory.get("cves"))

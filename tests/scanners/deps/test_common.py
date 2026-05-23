@@ -154,3 +154,84 @@ def test_cross_tool_baseline_compatibility() -> None:
     # accept survives a tool migration.
     assert npm_finding.fingerprint == pnpm_finding.fingerprint
     assert npm_finding.fingerprint == yarn_finding.fingerprint
+
+
+def test_cross_tool_baseline_compatibility_cve_only() -> None:
+    """Codex 30th review: cross-tool compatibility must also hold when
+    only a CVE is present (no GHSA). Previously, npm picked URL first
+    while yarn picked ``id`` first, so a CVE-only advisory diverged
+    between adapters."""
+    import json
+
+    from secscan.scanners.deps.npm import (
+        build_findings_from_npm_audit,
+    )
+    from secscan.scanners.deps.pnpm import (
+        build_findings_from_pnpm_audit,
+    )
+    from secscan.scanners.deps.yarn import (
+        build_findings_from_yarn_audit,
+    )
+
+    npm_payload = json.dumps(
+        {
+            "vulnerabilities": {
+                "lodash": {
+                    "name": "lodash",
+                    "severity": "high",
+                    "via": [
+                        {
+                            "cve": "CVE-2024-9999",
+                            "title": "lodash CVE",
+                            "severity": "high",
+                            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-9999",
+                        }
+                    ],
+                    "fixAvailable": False,
+                }
+            }
+        }
+    ).encode()
+    pnpm_payload = json.dumps(
+        {
+            "advisories": {
+                "1": {
+                    "id": 1,
+                    "cves": ["CVE-2024-9999"],
+                    "module_name": "lodash",
+                    "title": "lodash CVE",
+                    "severity": "high",
+                    "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-9999",
+                }
+            }
+        }
+    ).encode()
+    yarn_payload = (
+        json.dumps(
+            {
+                "advisories": {
+                    "1": {
+                        "id": 1,
+                        "cves": ["CVE-2024-9999"],
+                        "module_name": "lodash",
+                        "title": "lodash CVE",
+                        "severity": "high",
+                        "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-9999",
+                    }
+                }
+            }
+        )
+        + "\n"
+    ).encode()
+
+    (npm_finding,) = build_findings_from_npm_audit(npm_payload)
+    (pnpm_finding,) = build_findings_from_pnpm_audit(pnpm_payload)
+    (yarn_finding,) = build_findings_from_yarn_audit(
+        yarn_payload, workspace_id=""
+    )
+    assert npm_finding.fingerprint == pnpm_finding.fingerprint
+    assert npm_finding.fingerprint == yarn_finding.fingerprint
+    # All three carry the CVE identifier (not URL).
+    assert npm_finding.rule_id == "CVE-2024-9999"
+    assert pnpm_finding.rule_id == "CVE-2024-9999"
+    assert yarn_finding.rule_id == "CVE-2024-9999"

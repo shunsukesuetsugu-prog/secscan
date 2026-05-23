@@ -79,6 +79,51 @@ def deps_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def select_advisory_id(
+    advisory: object,
+    *,
+    fallback: str | None = None,
+) -> str | None:
+    """Pick the canonical advisory identifier from a tool-specific blob.
+
+    Cross-tool baseline compatibility (Codex 30th review) requires that
+    the SAME advisory reported by npm, pnpm, and yarn produces the same
+    ``advisory_id``. Pin the order: GHSA → CVE → URL → ``id`` / source →
+    caller fallback.
+
+    The function accepts ``object`` and not ``dict`` so callers that
+    might receive partial / malformed payloads don't need a separate
+    isinstance check.
+    """
+    if not isinstance(advisory, dict):
+        return fallback
+    # 1. GHSA-id field (npm canonical, pnpm canonical, yarn canonical).
+    ghsa = advisory.get("ghsa_id")
+    if isinstance(ghsa, str) and ghsa.strip():
+        return ghsa.strip()
+    # 2. CVE (either a single field or the first entry of a ``cves`` list).
+    cve = advisory.get("cve")
+    if isinstance(cve, str) and cve.startswith("CVE-"):
+        return cve
+    cves = advisory.get("cves")
+    if isinstance(cves, list):
+        for item in cves:
+            if isinstance(item, str) and item.startswith("CVE-"):
+                return item
+    # 3. URL (npm advisory URL or yarn ``url``).
+    url = advisory.get("url")
+    if isinstance(url, str) and url.strip():
+        return url.strip()
+    # 4. Numeric ``id`` / ``source`` fallback.
+    for key in ("id", "source"):
+        value = advisory.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return fallback
+
+
 @dataclass(frozen=True)
 class AdvisoryHints:
     """Best-effort metadata pulled from an advisory blob.

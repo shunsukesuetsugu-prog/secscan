@@ -37,7 +37,12 @@ from typing import Any
 
 from ...models import Finding, Location
 from ...runner import CommandResult, decode_output
-from ._common import AdvisoryHints, deps_fingerprint, severity_from_npm_label
+from ._common import (
+    AdvisoryHints,
+    deps_fingerprint,
+    select_advisory_id,
+    severity_from_npm_label,
+)
 
 NPM_AUDIT_ARGV: tuple[str, ...] = (
     "npm",
@@ -195,13 +200,7 @@ def _hints_from_advisory(
     started with ``url`` which made cross-tool baselines diverge
     silently.
     """
-    advisory_id = (
-        _first_str(advisory.get("ghsa_id"))
-        or _first_str(advisory.get("cve"))
-        or _extract_cve_from_url(advisory.get("url"))
-        or _first_str(advisory.get("url"))
-        or _coerce_str(advisory.get("source"))
-    )
+    advisory_id = select_advisory_id(advisory)
     if not advisory_id:
         return None
     cve = _first_str(advisory.get("cve")) or _extract_cve_from_url(advisory.get("url"))
