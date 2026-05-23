@@ -86,21 +86,34 @@ def select_advisory_id(
 ) -> str | None:
     """Pick the canonical advisory identifier from a tool-specific blob.
 
-    Cross-tool baseline compatibility (Codex 30th review) requires that
-    the SAME advisory reported by npm, pnpm, and yarn produces the same
-    ``advisory_id``. Pin the order: GHSA → CVE → URL → ``id`` / source →
-    caller fallback.
+    Cross-tool baseline compatibility (Codex 30th/31st review) requires
+    that the SAME advisory reported by npm, pnpm, and yarn produces the
+    same ``advisory_id``. Pin the order: GHSA → CVE → URL → numeric
+    id/source → caller fallback.
 
     The function accepts ``object`` and not ``dict`` so callers that
     might receive partial / malformed payloads don't need a separate
     isinstance check.
+
+    Codex 31st review: Yarn 4 sometimes places the GHSA in the ``id``
+    (or ``source``) field as a string rather than in ``ghsa_id``. The
+    GHSA sweep therefore also inspects those siblings, not just the
+    canonical key, so cross-tool fingerprint convergence holds for that
+    envelope too.
     """
     if not isinstance(advisory, dict):
         return fallback
-    # 1. GHSA-id field (npm canonical, pnpm canonical, yarn canonical).
+    # 1. GHSA — canonical ``ghsa_id`` field first, then any sibling
+    # field whose string value starts with ``GHSA-``. This catches the
+    # Yarn 4 envelope which sometimes carries the GHSA in ``id`` /
+    # ``source``.
     ghsa = advisory.get("ghsa_id")
-    if isinstance(ghsa, str) and ghsa.strip():
+    if isinstance(ghsa, str) and ghsa.strip().startswith("GHSA-"):
         return ghsa.strip()
+    for key in ("id", "source"):
+        value = advisory.get(key)
+        if isinstance(value, str) and value.strip().startswith("GHSA-"):
+            return value.strip()
     # 2. CVE (either a single field or the first entry of a ``cves`` list).
     cve = advisory.get("cve")
     if isinstance(cve, str) and cve.startswith("CVE-"):
@@ -114,7 +127,7 @@ def select_advisory_id(
     url = advisory.get("url")
     if isinstance(url, str) and url.strip():
         return url.strip()
-    # 4. Numeric ``id`` / ``source`` fallback.
+    # 4. Any remaining ``id`` / ``source`` (numeric or non-GHSA string).
     for key in ("id", "source"):
         value = advisory.get(key)
         if isinstance(value, str) and value.strip():

@@ -156,6 +156,87 @@ def test_cross_tool_baseline_compatibility() -> None:
     assert npm_finding.fingerprint == yarn_finding.fingerprint
 
 
+def test_select_advisory_id_finds_ghsa_in_id_or_source() -> None:
+    """Codex 31st review: Yarn 4 sometimes puts the GHSA into ``id``
+    (or ``source``) instead of the canonical ``ghsa_id`` field. The
+    selector must still prefer the GHSA over CVE/URL siblings, or
+    cross-tool fingerprints diverge."""
+    from secscan.scanners.deps._common import select_advisory_id
+
+    # GHSA in ``id`` beats a present CVE.
+    advisory = {
+        "id": "GHSA-AAAA-BBBB",
+        "cves": ["CVE-2024-9999"],
+        "url": "https://github.com/advisories/GHSA-AAAA-BBBB",
+    }
+    assert select_advisory_id(advisory) == "GHSA-AAAA-BBBB"
+    # GHSA in ``source`` ditto.
+    advisory = {"source": "GHSA-XYZ", "cves": ["CVE-2024-1"]}
+    assert select_advisory_id(advisory) == "GHSA-XYZ"
+    # And the canonical ``ghsa_id`` still wins over ``id`` if both
+    # exist (in case Yarn ever populates both).
+    advisory = {"ghsa_id": "GHSA-PRIMARY", "id": "GHSA-OTHER"}
+    assert select_advisory_id(advisory) == "GHSA-PRIMARY"
+
+
+def test_cross_tool_baseline_compatibility_yarn4_id_ghsa() -> None:
+    """End-to-end check: an advisory carrying its GHSA in ``id`` (the
+    Yarn 4 package-keyed shape) must fingerprint the same as the same
+    advisory carrying its GHSA in ``ghsa_id`` (npm/pnpm shape)."""
+    import json
+
+    from secscan.scanners.deps.npm import (
+        build_findings_from_npm_audit,
+    )
+    from secscan.scanners.deps.yarn import (
+        build_findings_from_yarn_audit,
+    )
+
+    npm_payload = json.dumps(
+        {
+            "vulnerabilities": {
+                "lodash": {
+                    "name": "lodash",
+                    "severity": "high",
+                    "via": [
+                        {
+                            "ghsa_id": "GHSA-IDFIELD-WIN",
+                            "title": "lodash issue",
+                            "severity": "high",
+                        }
+                    ],
+                    "fixAvailable": False,
+                }
+            }
+        }
+    ).encode()
+    # Yarn 4 package-keyed envelope: GHSA in ``id`` only.
+    yarn_payload = (
+        json.dumps(
+            {
+                "lodash": [
+                    {
+                        "id": "GHSA-IDFIELD-WIN",
+                        "title": "lodash issue",
+                        "severity": "high",
+                        "cves": ["CVE-2024-0001"],
+                        "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-0001",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    ).encode()
+    (npm_finding,) = build_findings_from_npm_audit(npm_payload)
+    (yarn_finding,) = build_findings_from_yarn_audit(
+        yarn_payload, workspace_id=""
+    )
+    assert npm_finding.fingerprint == yarn_finding.fingerprint
+    # And both carry the GHSA, not the CVE / URL.
+    assert npm_finding.rule_id == "GHSA-IDFIELD-WIN"
+    assert yarn_finding.rule_id == "GHSA-IDFIELD-WIN"
+
+
 def test_cross_tool_baseline_compatibility_cve_only() -> None:
     """Codex 30th review: cross-tool compatibility must also hold when
     only a CVE is present (no GHSA). Previously, npm picked URL first
