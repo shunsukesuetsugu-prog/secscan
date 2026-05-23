@@ -71,6 +71,7 @@ def run_scanners(
     errors: list[ScannerError] = []
     warnings: list[str] = []
     skipped: list[str] = []
+    scanned: list[str] = []
     tool_versions: dict[str, str] = {}
 
     selected = _select_scanners(scanners, only=only, skip=config.skip)
@@ -88,6 +89,10 @@ def run_scanners(
             # discovery warning already informs the user.
             continue
 
+        # We are about to call scanner.scan() at least once. Record the
+        # scanner as "actually ran" so the SARIF formatter can include a
+        # run for it (Codex 18th review).
+        scanned.append(scanner.name)
         for unit in applicable:
             try:
                 outcome = scanner.scan(unit, runner, scan_config)
@@ -163,6 +168,7 @@ def run_scanners(
         warnings=tuple(warnings),
         skipped=tuple(skipped),
         suppressed_by_baseline=suppressed,
+        scanned_scanners=tuple(scanned),
     )
     decision = evaluate(result, config)
     return OrchestratorResult(result=result, decision=decision)

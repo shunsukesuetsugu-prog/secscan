@@ -215,6 +215,14 @@ class RunResult:
     suppressed_by_baseline: tuple[Finding, ...] = ()
     """Findings removed by baseline; kept for --verbose display."""
 
+    scanned_scanners: tuple[str, ...] = ()
+    """Names of scanners whose ``scan()`` was actually invoked.
+
+    The SARIF formatter uses this to distinguish "scanner ran and found
+    nothing" from "scanner was skipped / unregistered". Codex 18th
+    review flagged that emitting empty runs for skipped scanners can
+    make GitHub Code Scanning mark previously-reported alerts as fixed."""
+
     @property
     def has_errors(self) -> bool:
         return len(self.errors) > 0

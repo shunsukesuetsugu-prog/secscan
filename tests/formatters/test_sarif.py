@@ -135,29 +135,43 @@ def test_full_payload_validates_against_sarif_schema(sarif_schema: dict) -> None
 # --- Run structure --------------------------------------------------------
 
 
-def test_one_run_per_scanner() -> None:
+def test_one_run_per_scanner_that_actually_ran() -> None:
+    """Codex 18th review: only scanners that actually ran get a SARIF
+    ``run``. Findings/errors/suppressed all qualify a scanner as having
+    "ran"; pure ``skipped`` does NOT — empty success runs for skipped
+    scanners would let GitHub mark previous alerts as fixed."""
     rr = RunResult(
         findings=(
             _finding(scanner="sast", fingerprint="s"),
             _finding(scanner="secrets", fingerprint="x"),
-        )
+        ),
+        scanned_scanners=("sast", "secrets"),
     )
     payload = _emit(rr)
-    names = [r["tool"]["driver"]["name"] for r in payload["runs"]]
-    # Always includes the three MVP scanners so a clean run still uploads
-    # a meaningful SARIF.
-    assert "secscan-sast" in names
-    assert "secscan-secrets" in names
-    assert "secscan-deps" in names
-
-
-def test_clean_run_still_emits_runs_for_each_mvp_scanner() -> None:
-    payload = _emit(RunResult())
     names = {r["tool"]["driver"]["name"] for r in payload["runs"]}
-    assert names == {"secscan-secrets", "secscan-deps", "secscan-sast"}
-    # All runs have empty results.
-    for run in payload["runs"]:
-        assert run["results"] == []
+    assert names == {"secscan-sast", "secscan-secrets"}
+    # deps was not in scanned_scanners → NOT in runs.
+    assert "secscan-deps" not in names
+
+
+def test_completely_empty_run_produces_no_sarif_runs() -> None:
+    """A RunResult with no scanned scanners (e.g. the CLI rejected the
+    invocation before any scanner ran) must NOT pretend a scan happened."""
+    payload = _emit(RunResult())
+    assert payload["runs"] == []
+
+
+def test_clean_scanner_run_is_visible() -> None:
+    """If a scanner ran and produced zero findings, its run still
+    appears so the GitHub Code Scanning view shows a successful
+    analysis."""
+    payload = _emit(RunResult(scanned_scanners=("secrets",)))
+    names = {r["tool"]["driver"]["name"] for r in payload["runs"]}
+    assert names == {"secscan-secrets"}
+    # Empty results, executionSuccessful=True.
+    (run,) = payload["runs"]
+    assert run["results"] == []
+    assert run["invocations"][0]["executionSuccessful"] is True
 
 
 # --- Rules / ruleIndex ----------------------------------------------------
@@ -298,15 +312,63 @@ def test_finding_raw_fingerprint_is_never_serialized_to_sarif() -> None:
     assert "/abs/path/from/upstream" not in blob
 
 
-def test_file_uri_has_no_leading_slash() -> None:
-    """SARIF artifact URIs are relative to the project root by convention,
-    and GitHub Code Scanning rejects leading-slash URIs."""
+def test_absolute_file_path_is_rejected_to_synthetic_uri() -> None:
+    """Codex 18th review: an absolute path in ``loc.file`` is hard-rejected
+    by ``_safe_relative_uri`` and falls through to the synthetic / unknown
+    URI. SARIF artifact URIs must be relative to the project root —
+    GitHub silently rejects leading-slash entries."""
     f = _finding(file="/src/a.py")
     payload = _emit(RunResult(findings=(f,)))
     uri = _run(payload, "sast")["results"][0]["locations"][0][
         "physicalLocation"
     ]["artifactLocation"]["uri"]
     assert not uri.startswith("/")
+    # No file → "unknown" (no package metadata on a sast finding).
+    assert uri == "unknown"
+
+
+def test_dotdot_traversal_in_file_is_rejected() -> None:
+    """``..`` segments in a scanner-reported path must NOT survive into
+    the SARIF artifact URI (Codex 18th HIGH)."""
+    f = _finding(file="../../etc/passwd")
+    payload = _emit(RunResult(findings=(f,)))
+    uri = _run(payload, "sast")["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
+    assert ".." not in uri
+    assert "passwd" not in uri
+
+
+def test_backslash_traversal_in_file_is_rejected() -> None:
+    """Backslash-separated traversal (Windows-shaped, or a misbehaving
+    scanner on POSIX) also must NOT pass through."""
+    f = _finding(file="..\\..\\etc\\passwd")
+    payload = _emit(RunResult(findings=(f,)))
+    uri = _run(payload, "sast")["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
+    assert ".." not in uri
+    assert "passwd" not in uri
+
+
+def test_uri_scheme_in_file_is_rejected() -> None:
+    """``file:`` / ``http:`` / etc. URI schemes embedded in ``loc.file``
+    are refused — the SARIF location must not become an arbitrary URL."""
+    f = _finding(file="http://evil.example/x")
+    payload = _emit(RunResult(findings=(f,)))
+    uri = _run(payload, "sast")["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
+    assert "evil.example" not in uri
+    assert uri == "unknown"
+
+
+def test_normal_relative_path_passes_through() -> None:
+    f = _finding(file="src/a.py")
+    payload = _emit(RunResult(findings=(f,)))
+    uri = _run(payload, "sast")["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
     assert uri == "src/a.py"
 
 
@@ -340,6 +402,9 @@ def test_baseline_suppressed_findings_included_with_opt_in() -> None:
 
 
 def test_scanner_error_appears_as_error_notification() -> None:
+    """A scanner that ERRORED still gets a run — it ran, it just didn't
+    complete cleanly. GitHub treats this as "tool ran, no results"
+    rather than skipped."""
     rr = RunResult(
         errors=(
             ScannerError(scanner="deps", reason="npm exited 2", returncode=2),
@@ -355,17 +420,16 @@ def test_scanner_error_appears_as_error_notification() -> None:
 
 
 def test_execution_successful_reflects_scanner_errors() -> None:
-    rr_clean = RunResult()
+    rr_clean = RunResult(scanned_scanners=("secrets",))
     rr_failed = RunResult(
         errors=(ScannerError(scanner="sast", reason="boom"),),
+        scanned_scanners=("sast",),
     )
     clean = _emit(rr_clean)
     failed = _emit(rr_failed)
     for run in clean["runs"]:
         assert run["invocations"][0]["executionSuccessful"] is True
-    (sast_run,) = [
-        r for r in failed["runs"] if r["tool"]["driver"]["name"] == "secscan-sast"
-    ]
+    sast_run = _run(failed, "sast")
     assert sast_run["invocations"][0]["executionSuccessful"] is False
 
 

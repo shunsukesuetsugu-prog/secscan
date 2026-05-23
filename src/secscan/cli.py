@@ -215,6 +215,16 @@ def _dispatch(args: argparse.Namespace) -> int:
 
 
 def _dispatch_scan(args: argparse.Namespace) -> int:
+    # Codex 18th review: validate format/quiet incompatibility BEFORE we
+    # start any scanner. The previous order ran gitleaks / npm /
+    # pip-audit / semgrep and only then noticed the CLI was invalid.
+    format_name = getattr(args, "format", "text")
+    if getattr(args, "quiet", False) and format_name != "text":
+        _print_error(
+            f"--quiet is only valid with --format=text; got --format={format_name}"
+        )
+        return int(ExitCode.SCAN_ERROR)
+
     try:
         scan_root = resolve_scan_root(args.path)
     except PathSafetyError as exc:
@@ -299,17 +309,9 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
     else:
         final_decision = outcome.decision
 
-    format_name = getattr(args, "format", "text")
+    # format_name / quiet were already validated at the top of this
+    # function before scanners ran (Codex 18th review).
     quiet = getattr(args, "quiet", False)
-
-    # Codex 17th review: --quiet is text-only. Combining it with a
-    # structured format would silently fall back and produce a broken
-    # artifact for downstream tooling, so we error out instead.
-    if quiet and format_name != "text":
-        _print_error(
-            f"--quiet is only valid with --format=text; got --format={format_name}"
-        )
-        return int(ExitCode.SCAN_ERROR)
 
     options = FormatOptions(
         use_color=_should_use_color(args, sys.stdout) and format_name == "text",

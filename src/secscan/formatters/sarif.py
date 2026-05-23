@@ -76,9 +76,18 @@ def format_sarif(
     else:
         suppressed = {}
 
-    # Always include the three MVP scanners so a clean run still uploads a
-    # meaningful SARIF (GitHub renders a "0 alerts" status per tool).
-    scanner_names = sorted(set(findings) | set(suppressed) | {"secrets", "deps", "sast"})
+    # Codex 18th review: emit a SARIF run ONLY for scanners that actually
+    # ran. Emitting empty success runs for skipped scanners causes
+    # GitHub Code Scanning to mark previously-reported alerts as fixed
+    # when in fact the scanner did not check anything. A scanner that
+    # ERRORED also counts as having run — the user needs to see the
+    # notification, and GitHub treats erroring tools as "ran, no
+    # results" rather than skipped.
+    actually_ran = set(result.scanned_scanners)
+    errored = {e.scanner for e in result.errors}
+    scanner_names = sorted(
+        actually_ran | errored | set(findings) | set(suppressed)
+    )
 
     runs = [
         _build_run(
@@ -233,24 +242,60 @@ def _uri_for(finding: Finding) -> str:
     """Pick the artifact URI for a finding.
 
     Priority:
-    1. ``location.file`` if set (sast / secrets, and deps with a known
-       lockfile location).
+    1. ``location.file`` if set AND it passes the safety check.
     2. A synthetic ``deps:<ecosystem>/<package>`` URI for deps findings
        that have no file but do have package metadata. We use a custom
        scheme so it can't be mistaken for a real file path.
-    3. ``"unknown"`` as a last resort (should not happen in practice).
+    3. ``"unknown"`` as a last resort.
+
+    Codex 18th review (HIGH): a ``..`` segment or backslash in
+    ``loc.file`` would survive into the SARIF URI even though
+    orchestrator's path-stripping is meant to prevent root-escape. The
+    SARIF artifact URI is the artifact's identity in GitHub Code
+    Scanning — a misattributed URI corrupts dedup. We sanitize hard.
     """
     loc = finding.location
     if loc is None:
         return "unknown"
     if loc.file:
-        # SARIF prefers forward slashes regardless of host OS.
-        return loc.file.replace("\\", "/").lstrip("/")
+        safe = _safe_relative_uri(loc.file)
+        if safe is not None:
+            return safe
     if loc.package and loc.ecosystem:
         return f"deps:{loc.ecosystem}/{loc.package}"
     if loc.package:
         return f"deps:{loc.package}"
     return "unknown"
+
+
+def _safe_relative_uri(raw: str) -> str | None:
+    """Convert a scanner-reported file path to a safe SARIF URI.
+
+    Returns ``None`` if the path is unsafe (contains traversal segments,
+    a URI scheme of its own, a Windows drive letter, a NUL byte, or is
+    absolute). The caller falls back to a synthetic / "unknown" URI in
+    that case.
+    """
+    if not raw or "\x00" in raw:
+        return None
+    # Normalize separators first so the rest of the checks see forward
+    # slashes only. We accept Windows-style ``\`` *as a separator* but
+    # nothing else.
+    candidate = raw.replace("\\", "/")
+    # Absolute path? Reject — SARIF artifact URIs must be relative to
+    # the project root.
+    if candidate.startswith("/"):
+        return None
+    # URI scheme (e.g. ``file:`` / ``http:``) before the first path
+    # component? Reject — we never want a SARIF location to point at an
+    # arbitrary URL.
+    first_segment = candidate.split("/", 1)[0]
+    if ":" in first_segment:
+        return None
+    # Path traversal? Reject any segment exactly equal to ``..``.
+    if any(seg == ".." for seg in candidate.split("/")):
+        return None
+    return candidate
 
 
 def _build_fingerprints(finding: Finding) -> dict[str, str]:
