@@ -289,7 +289,8 @@ specific Codex review iteration that motivated each invariant.
 | 1C    | `sast` (semgrep)                                   | done                    |
 | 1D    | docs + final review                                | done (v0.1.0)           |
 | 2-A   | JSON / SARIF output                                | done (v0.2.0)           |
-| 2-B+  | DAST (OWASP ZAP), monorepo / workspaces            | future                  |
+| 2-B   | monorepo / workspaces (pnpm + npm)                 | done (v0.3.0)           |
+| 2-C+  | DAST, uv workspace per-member, yarn workspaces     | future                  |
 
 ## Development
 
@@ -304,18 +305,53 @@ Integration tests against real `gitleaks` / `semgrep` are gated by
 PATH. They produce a useful smoke check during development; CI may
 choose to install the tools and run them, or skip.
 
-## Known limitations (MVP)
+## Monorepos / workspaces
 
-- Single-project layout only. Monorepos / workspaces (pnpm-workspaces,
-  uv workspaces, etc.) are deferred to Phase 2 — Discovery emits a
-  warning when nested manifests are detected.
-- No JSON / SARIF output yet. The terminal report is the only format.
-- No DAST yet — `secscan dast` is reserved for Phase 2.
+`secscan deps` understands the two most-common JavaScript workspace
+configurations and audits each member separately:
+
+| Workspace format | Detection                                                         | Per-member audit            |
+| ---------------- | ----------------------------------------------------------------- | --------------------------- |
+| **pnpm**         | `pnpm-workspace.yaml` (`packages:` glob, `!` excludes supported)  | `pnpm audit --filter <name>` |
+| **npm**          | `package.json#workspaces` (array or `{packages: [...]}`)          | `npm audit --workspace <name>` |
+| **uv** (Python)  | `[tool.uv.workspace]` in `pyproject.toml`                         | **detected; warning emitted**, root scanned as one unit. Per-member audit requires `uv export -o requirements.txt --package <name>` for now (planned for a future release). |
+| **yarn**         | `yarn.lock` + `workspaces` — **unsupported**, warning emitted     | n/a                          |
+
+Properties that make this safe for monorepos:
+
+- The audit always runs from the **repo root** so the authoritative root
+  lockfile is used; `--workspace` / `--filter` scope the result to one
+  member.
+- Each member gets a **distinct fingerprint** (`deps-ws:` prefix +
+  member name). The same `lodash` advisory in `packages/api` and
+  `packages/web` produces two separate baseline entries — accepting one
+  does NOT silence the other.
+- File paths in findings are rewritten to **repo-root-relative** form
+  (e.g. `packages/api/src/leak.py`), so reports stay consistent
+  regardless of which member the scanner ran in.
+- Symlinked workspace members, glob patterns with `..` / absolute
+  paths / URI schemes, and member `name` strings containing pnpm
+  selector grammar (`!`, `*`, `^`, `~`, ...) are all refused with a
+  warning rather than included.
+- An empty or malformed workspace config does NOT silently disable the
+  repo-root scan — single-project deps detection still runs.
+- Workspace member counts above 50 emit an informational warning; above
+  100 the list is truncated with a separate warning.
+
+Secrets and SAST scanners are not workspace-aware; they always scan the
+whole repo root as a single unit (file content doesn't follow
+ecosystem boundaries).
+
+## Known limitations
+
+- No DAST yet — `secscan dast` is reserved for a future release.
 - npm v6 audit output is explicitly **not** parsed; the scanner rejects
   it with an instructive error telling the user to upgrade to npm v7+.
 - pip-audit cannot consume `uv.lock` / `pdm.lock` directly. The scanner
   errors out with a hint to `uv export` / `pdm export` to
   requirements.txt first.
+- yarn workspaces are not supported; pnpm or npm workspaces are
+  recommended.
 
 ## License
 
