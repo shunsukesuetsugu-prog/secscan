@@ -77,3 +77,80 @@ def test_fingerprint_rejects_empty_inputs() -> None:
         deps_fingerprint(ecosystem="npm", package="", advisory_id="GHSA-x")
     with pytest.raises(ValueError):
         deps_fingerprint(ecosystem="npm", package="lodash", advisory_id="")
+
+
+def test_cross_tool_baseline_compatibility() -> None:
+    """Codex 29th review: the same advisory (same GHSA) reported by
+    npm, pnpm, and yarn must produce identical fingerprints so a
+    ``baseline accept`` from one tool also suppresses the same finding
+    when the project migrates between package managers."""
+    import json
+
+    from secscan.scanners.deps.npm import (
+        build_findings_from_npm_audit,
+    )
+    from secscan.scanners.deps.pnpm import (
+        build_findings_from_pnpm_audit,
+    )
+    from secscan.scanners.deps.yarn import (
+        build_findings_from_yarn_audit,
+    )
+
+    npm_payload = json.dumps(
+        {
+            "vulnerabilities": {
+                "lodash": {
+                    "name": "lodash",
+                    "severity": "high",
+                    "via": [
+                        {
+                            "ghsa_id": "GHSA-AAAA-BBBB-CCCC",
+                            "title": "lodash RCE",
+                            "severity": "high",
+                            "url": "https://github.com/advisories/GHSA-AAAA-BBBB-CCCC",
+                        }
+                    ],
+                    "fixAvailable": False,
+                }
+            }
+        }
+    ).encode()
+    pnpm_payload = json.dumps(
+        {
+            "advisories": {
+                "1": {
+                    "id": 1,
+                    "ghsa_id": "GHSA-AAAA-BBBB-CCCC",
+                    "module_name": "lodash",
+                    "title": "lodash RCE",
+                    "severity": "high",
+                }
+            }
+        }
+    ).encode()
+    yarn_payload = (
+        json.dumps(
+            {
+                "advisories": {
+                    "1": {
+                        "id": 1,
+                        "ghsa_id": "GHSA-AAAA-BBBB-CCCC",
+                        "module_name": "lodash",
+                        "title": "lodash RCE",
+                        "severity": "high",
+                    }
+                }
+            }
+        )
+        + "\n"
+    ).encode()
+
+    (npm_finding,) = build_findings_from_npm_audit(npm_payload)
+    (pnpm_finding,) = build_findings_from_pnpm_audit(pnpm_payload)
+    (yarn_finding,) = build_findings_from_yarn_audit(
+        yarn_payload, workspace_id=""
+    )
+    # All three must agree on the fingerprint so a single baseline
+    # accept survives a tool migration.
+    assert npm_finding.fingerprint == pnpm_finding.fingerprint
+    assert npm_finding.fingerprint == yarn_finding.fingerprint

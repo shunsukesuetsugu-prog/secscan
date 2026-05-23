@@ -187,13 +187,19 @@ def build_findings_from_npm_audit(
 def _hints_from_advisory(
     advisory: dict[str, Any], pkg_fix_version: str | None
 ) -> AdvisoryHints | None:
-    """Extract the fields we display from an npm advisory object."""
-    # Primary identifier: GHSA id > CVE > numeric source/id. Without one
-    # of these we cannot fingerprint the finding stably, so skip.
+    """Extract the fields we display from an npm advisory object.
+
+    Codex 29th review: prefer GHSA > CVE > URL > source so that the same
+    advisory in an npm vs pnpm vs yarn report produces the SAME
+    advisory_id (and therefore the same fingerprint). Earlier the order
+    started with ``url`` which made cross-tool baselines diverge
+    silently.
+    """
     advisory_id = (
-        _first_str(advisory.get("url"))
-        or _first_str(advisory.get("ghsa_id"))
+        _first_str(advisory.get("ghsa_id"))
         or _first_str(advisory.get("cve"))
+        or _extract_cve_from_url(advisory.get("url"))
+        or _first_str(advisory.get("url"))
         or _coerce_str(advisory.get("source"))
     )
     if not advisory_id:

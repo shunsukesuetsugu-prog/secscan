@@ -146,6 +146,32 @@ def test_parses_package_keyed_shape_ndjson() -> None:
     assert f.location.package == "underscore"
 
 
+def test_package_keyed_shape_uses_top_level_key_when_module_name_missing() -> None:
+    """Codex 29th review BLOCKER: in the package-keyed envelope, the
+    top-level key IS the package name and the inner advisory may omit
+    ``module_name`` / ``name``. We must fall back to the key, not
+    silently drop the finding."""
+    line = json.dumps(
+        {
+            "lodash": [
+                {
+                    "ghsa_id": "GHSA-XYZ",
+                    "title": "Vulnerable lodash",
+                    "severity": "high",
+                    # NOTE: no module_name / name fields.
+                }
+            ]
+        }
+    )
+    findings = build_findings_from_yarn_audit(
+        (line + "\n").encode(), workspace_id="@org/api"
+    )
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.location is not None
+    assert f.location.package == "lodash"
+
+
 def test_empty_object_is_clean_success() -> None:
     """Yarn emits ``{}`` for an audit that found nothing. That must
     parse as zero findings, not a malformed report."""

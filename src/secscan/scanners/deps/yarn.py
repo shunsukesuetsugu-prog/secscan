@@ -130,6 +130,7 @@ def build_findings_from_yarn_audit(
                     workspace_id=workspace_id,
                     findings=findings,
                     seen=seen,
+                    package_hint=str(key),
                 )
     return tuple(findings)
 
@@ -141,10 +142,20 @@ def _append_from_advisory(
     workspace_id: str,
     findings: list[Finding],
     seen: set[str],
+    package_hint: str | None = None,
 ) -> None:
-    """Add one normalized Finding for an advisory blob, with dedup."""
-    package = _first_str(advisory.get("module_name")) or _first_str(
-        advisory.get("name")
+    """Add one normalized Finding for an advisory blob, with dedup.
+
+    ``package_hint`` lets the package-keyed parser shape (Yarn 4 / bulk
+    forward) supply the top-level key as the package name when the
+    advisory object itself omits ``module_name`` / ``name``. Codex 29th
+    review flagged that omitting this fallback silently dropped
+    findings in that shape.
+    """
+    package = (
+        _first_str(advisory.get("module_name"))
+        or _first_str(advisory.get("name"))
+        or package_hint
     )
     if not package:
         return
