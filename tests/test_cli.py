@@ -169,20 +169,24 @@ def test_tool_not_installed_exits_with_scan_error(
     assert "scanner errors" in out
 
 
-def test_all_runs_every_registered_scanner(
+def test_all_warns_and_fails_when_deps_or_sast_missing(
     project: Path,
     stub_gitleaks_installed: None,
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Phase 1A only registers secrets, so "all" == "secrets" for now.
+    # In Phase 1A, secrets is registered but deps/sast are not. The user
+    # asked for "all"; getting a quiet exit 0 would be a false green. The
+    # CLI must surface the gap and refuse to claim success.
     scripted_runner.queue(returncode=0, stdout=b"[]")
     scripted_runner.queue(returncode=0, stdout=b"")
     rc = cli.main(["all", "--path", str(project)])
-    assert rc == int(ExitCode.OK)
     out = capsys.readouterr().out
-    # secrets scanner ran; sast/deps not registered yet.
-    assert "no findings" in out
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "partial scan" in out
+    # Both missing scanners listed in the warning, deps + sast.
+    assert "deps" in out
+    assert "sast" in out
 
 
 def test_quiet_emits_single_line(

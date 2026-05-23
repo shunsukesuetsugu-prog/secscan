@@ -191,11 +191,27 @@ def _parse_findings(
             reason="gitleaks reported leaks (exit 101) but stdout was not a JSON array"
         )
 
+    if not data:
+        # Codex 4th review: `exit 101 + []` is a contradiction — gitleaks
+        # only emits 101 when there ARE leaks. Treating this as "0 findings"
+        # would be a silent false-clean.
+        return _ParseError(
+            reason="gitleaks reported leaks (exit 101) but the JSON array was empty"
+        )
+
     findings: list[Finding] = []
     for item in data:
         if not isinstance(item, dict):
             continue
         findings.append(_finding_from_gitleaks(item, scan_root))
+
+    if not findings:
+        # Every item failed structural validation — still a contradiction
+        # with exit 101.
+        return _ParseError(
+            reason="gitleaks reported leaks (exit 101) but no parseable items "
+            "were present in the JSON array"
+        )
     return tuple(findings)
 
 
@@ -323,7 +339,10 @@ def _error(
     tool_version: str | None,
     duration: float,
 ) -> ScanOutcome:
-    excerpt = redact_text(truncate(decode_output(stderr)))
+    # Order: redact first (so credential-shaped tokens are matched whole),
+    # then truncate. Truncating first could split a token across the cut
+    # and let a prefix slip past the redactor (Codex 4th review).
+    excerpt = truncate(redact_text(decode_output(stderr)))
     return ScanOutcome(
         scanner=scanner,
         error=ScannerError(

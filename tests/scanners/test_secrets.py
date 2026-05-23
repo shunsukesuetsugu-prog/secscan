@@ -310,6 +310,33 @@ def test_leak_exit_with_empty_stdout_is_scan_error(
     assert "empty" in outcome.error.reason.lower()
 
 
+@pytest.mark.usefixtures("stub_which")
+def test_leak_exit_with_empty_json_array_is_scan_error(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    # Codex 4th review: `exit 101 + []` is a contradiction — gitleaks emits
+    # 101 only when it found leaks. An empty array under that exit code
+    # MUST NOT be silently treated as "0 findings".
+    fake_runner.push(returncode=101, stdout=b"[]")
+    fake_runner.push(returncode=0, stdout=b"")
+    outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "empty" in outcome.error.reason.lower()
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_leak_exit_with_no_parseable_items_is_scan_error(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    # exit 101 + array of non-dicts → no parseable findings. Treat as error.
+    fake_runner.push(returncode=101, stdout=b"[1, \"oops\", null]")
+    fake_runner.push(returncode=0, stdout=b"")
+    outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
+    assert not outcome.succeeded
+    assert outcome.error is not None
+
+
 def test_tool_not_installed_raises_tool_not_found(
     scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
 ) -> None:

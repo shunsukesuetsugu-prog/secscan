@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from pathlib import Path
+from types import MappingProxyType
 
 from .baseline import (
     Baseline,
@@ -104,9 +105,11 @@ def run_scanners(
                 # We intentionally catch broad exceptions: a single mis-
                 # behaving scanner must not kill the whole run.
                 # ``str(exc)`` may include scanned-file content / env values,
-                # so redact before storing.
-                safe_reason = redact_text(
-                    truncate(f"scanner crashed: {type(exc).__name__}: {exc}", limit=300)
+                # so redact FIRST (so credential-shaped values are caught
+                # whole), then truncate.
+                safe_reason = truncate(
+                    redact_text(f"scanner crashed: {type(exc).__name__}: {exc}"),
+                    limit=300,
                 )
                 errors.append(
                     ScannerError(
@@ -179,15 +182,17 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
     if scanner_name == "deps":
         return ScanConfig(
             timeout_seconds=config.deps.timeout_seconds,
-            extra={
-                "allow_missing_lockfile": config.deps.allow_missing_lockfile,
-                "ignore_dev_dependencies": config.deps.ignore_dev_dependencies,
-            },
+            extra=MappingProxyType(
+                {
+                    "allow_missing_lockfile": config.deps.allow_missing_lockfile,
+                    "ignore_dev_dependencies": config.deps.ignore_dev_dependencies,
+                }
+            ),
         )
     if scanner_name == "sast":
         return ScanConfig(
             timeout_seconds=config.sast.timeout_seconds,
-            extra={"semgrep_config": config.sast.semgrep_config},
+            extra=MappingProxyType({"semgrep_config": config.sast.semgrep_config}),
         )
     if scanner_name == "secrets":
         return ScanConfig(timeout_seconds=config.secrets.timeout_seconds)

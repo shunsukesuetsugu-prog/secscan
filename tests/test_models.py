@@ -74,6 +74,18 @@ def test_finding_is_frozen_and_hashable() -> None:
     assert hash(f) == hash(_make_finding())
 
 
+def test_finding_hash_ignores_raw_dict() -> None:
+    # The ``raw`` field can hold a mutable dict (SARIF/forensics). It must
+    # be excluded from hash/eq so two Findings that differ only in raw
+    # payload still hash equally and compare equal — and so a Finding with
+    # raw populated is still hashable at all.
+    base = _make_finding()
+    with_raw = _make_finding()
+    object.__setattr__(with_raw, "raw", {"some": "payload"})
+    assert hash(base) == hash(with_raw)
+    assert base == with_raw
+
+
 def test_finding_equality_uses_all_fields() -> None:
     f1 = _make_finding()
     f2 = _make_finding(rule_id="other-rule")

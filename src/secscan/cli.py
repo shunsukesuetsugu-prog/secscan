@@ -218,6 +218,17 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
         )
         return int(ExitCode.SCAN_ERROR)
 
+    # For ``secscan all``, the user expects "every kind of check we know
+    # about" — secrets + deps + sast. If any of those is NOT registered,
+    # warn (and skip-list it) instead of silently running a subset and
+    # exiting 0. We pass these as ``skipped`` warnings to the orchestrator
+    # via a synthetic config; the orchestrator already reports skipped
+    # scanners in the output, so this surfaces the gap to the user.
+    expected_all_scanners = {"secrets", "deps", "sast"}
+    missing_for_all: tuple[str, ...] = ()
+    if args.command == "all":
+        missing_for_all = tuple(sorted(expected_all_scanners - _REGISTERED_NAMES))
+
     scanners = [cls() for cls in ALL_SCANNERS]
 
     runner = SubprocessCommandRunner()
@@ -235,14 +246,41 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
         _print_error(f"baseline error: {exc}")
         return int(ExitCode.SCAN_ERROR)
 
+    final_result = outcome.result
+    if missing_for_all:
+        # Augment the RunResult so the reporter shows these as gaps. Frozen
+        # dataclass — replace, don't mutate.
+        from dataclasses import replace as _replace
+
+        final_result = _replace(
+            final_result,
+            skipped=tuple(sorted(set(final_result.skipped) | set(missing_for_all))),
+            warnings=(
+                *final_result.warnings,
+                f"`secscan all` ran a partial scan: the following scanner(s) are not "
+                f"yet implemented in this build and were SKIPPED, not passed: "
+                f"{', '.join(missing_for_all)}",
+            ),
+        )
+
+    # When ``all`` is partial, we must not exit 0 on findings==0. The user
+    # asked for "everything" and got "subset"; that's an inconclusive scan
+    # for CI purposes, not a clean one.
+    if missing_for_all and outcome.decision.exit_code == ExitCode.OK:
+        from dataclasses import replace as _replace
+
+        final_decision = _replace(outcome.decision, exit_code=ExitCode.SCAN_ERROR)
+    else:
+        final_decision = outcome.decision
+
     options = ReportOptions(
         use_color=_should_use_color(args, sys.stdout),
         verbose=getattr(args, "verbose", False),
         quiet=getattr(args, "quiet", False),
     )
-    sys.stdout.write(render_report(outcome.result, outcome.decision, options))
+    sys.stdout.write(render_report(final_result, final_decision, options))
     sys.stdout.write("\n")
-    return int(outcome.decision.exit_code)
+    return int(final_decision.exit_code)
 
 
 def _dispatch_baseline(args: argparse.Namespace) -> int:

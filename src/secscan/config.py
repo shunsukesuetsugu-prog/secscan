@@ -225,13 +225,26 @@ def _require_str_list(value: object, name: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _parse_severity(value: object, name: str) -> Severity:
-    if isinstance(value, str):
-        try:
-            return Severity.from_name(value)
-        except ValueError as exc:
-            raise ConfigError(f"{name}: {exc}") from exc
-    raise ConfigError(f"{name} must be a severity name string")
+def _parse_severity(value: object, name: str, *, allow_never: bool = False) -> Severity:
+    """Parse a severity name from config.
+
+    ``allow_never`` controls whether the threshold-only sentinel
+    ``Severity.NEVER`` ("none") is acceptable. It must be True ONLY for
+    ``scan.fail_on``; for ``severity_overrides`` the sentinel would attach
+    to actual findings and break invariants downstream (Codex 4th review).
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a severity name string")
+    try:
+        parsed = Severity.from_name(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name}: {exc}") from exc
+    if parsed == Severity.NEVER and not allow_never:
+        raise ConfigError(
+            f"{name}: 'none' / NEVER is only valid as a fail-on threshold; "
+            f"finding severities must be a concrete level"
+        )
+    return parsed
 
 
 def _reject_unknown(table: dict[str, object], known: set[str], section: str) -> None:
@@ -265,7 +278,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         {"fail_on", "skip", "timeout_seconds", "severity_unknown_policy"},
         "scan",
     )
-    fail_on = _parse_severity(scan.get("fail_on", "high"), "scan.fail_on")
+    fail_on = _parse_severity(
+        scan.get("fail_on", "high"), "scan.fail_on", allow_never=True
+    )
     skip = _require_str_list(scan.get("skip", []), "scan.skip")
     for s in skip:
         if s not in _VALID_SCANNERS:

@@ -98,15 +98,16 @@ class Location:
 class Finding:
     """A single normalized vulnerability/policy violation.
 
-    Findings are immutable. ``fingerprint`` identifies the same issue across
-    runs for baseline suppression; ``raw_fingerprint`` preserves the upstream
-    tool's own fingerprint (gitleaks, semgrep AppSec) when available, so we
-    can cross-reference with native ignore mechanisms.
+    Findings are immutable AND hashable: the ``raw`` field (which can hold a
+    mutable dict for SARIF/forensics) is excluded from ``__hash__`` /
+    ``__eq__`` via ``field(hash=False, compare=False)``. Identity for
+    deduplication and equality is therefore driven by the structured fields
+    (scanner, rule_id, severity, ..., fingerprint), not by raw payload.
 
-    Note: although the dataclass is frozen, instances are NOT hashable: the
-    ``raw`` field carries a dict for SARIF/forensics, and dicts break hash
-    invariance. Code that needs set-like deduplication should key on
-    ``fingerprint`` explicitly.
+    ``fingerprint`` identifies the same issue across runs for baseline
+    suppression; ``raw_fingerprint`` preserves the upstream tool's own
+    fingerprint (gitleaks, semgrep AppSec) when available, so we can
+    cross-reference with native ignore mechanisms.
     """
 
     scanner: str

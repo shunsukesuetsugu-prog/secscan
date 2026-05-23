@@ -200,3 +200,20 @@ def test_semgrep_config_must_be_list(tmp_path: Path) -> None:
 def test_bool_field_rejects_int(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="must be a boolean"):
         load_config_file(_write(tmp_path, "[deps]\nallow_missing_lockfile = 1\n"))
+
+
+def test_fail_on_none_is_accepted(tmp_path: Path) -> None:
+    cfg = load_config_file(_write(tmp_path, "[scan]\nfail_on = 'none'\n"))
+    assert cfg.fail_on == Severity.NEVER
+
+
+def test_severity_overrides_rejects_none(tmp_path: Path) -> None:
+    # `--fail-on none` is OK as a threshold sentinel, but a finding cannot
+    # have severity NEVER. severity_overrides must therefore refuse "none".
+    with pytest.raises(ConfigError, match="only valid as a fail-on threshold"):
+        load_config_file(
+            _write(
+                tmp_path,
+                "[severity_overrides.secrets]\n\"x\" = 'none'\n",
+            )
+        )
