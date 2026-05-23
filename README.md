@@ -290,7 +290,8 @@ specific Codex review iteration that motivated each invariant.
 | 1D    | docs + final review                                | done (v0.1.0)           |
 | 2-A   | JSON / SARIF output                                | done (v0.2.0)           |
 | 2-B   | monorepo / workspaces (pnpm + npm)                 | done (v0.3.0)           |
-| 2-C+  | DAST, uv workspace per-member, yarn workspaces     | future                  |
+| 2-C   | uv per-member audit + Yarn Berry workspaces        | done (v0.4.0)           |
+| 2-D+  | DAST (OWASP ZAP)                                   | future                  |
 
 ## Development
 
@@ -307,15 +308,16 @@ choose to install the tools and run them, or skip.
 
 ## Monorepos / workspaces
 
-`secscan deps` understands the two most-common JavaScript workspace
-configurations and audits each member separately:
+`secscan deps` understands the four most-common JavaScript / Python
+workspace configurations and audits each member separately:
 
 | Workspace format | Detection                                                         | Per-member audit            |
 | ---------------- | ----------------------------------------------------------------- | --------------------------- |
 | **pnpm**         | `pnpm-workspace.yaml` (`packages:` glob, `!` excludes supported)  | `pnpm audit --filter <name>` |
 | **npm**          | `package.json#workspaces` (array or `{packages: [...]}`)          | `npm audit --workspace <name>` |
-| **uv** (Python)  | `[tool.uv.workspace]` in `pyproject.toml`                         | **detected; warning emitted**, root scanned as one unit. Per-member audit requires `uv export -o requirements.txt --package <name>` for now (planned for a future release). |
-| **yarn**         | `yarn.lock` + `workspaces` — **unsupported**, warning emitted     | n/a                          |
+| **uv** (Python)  | `[tool.uv.workspace] members` + `exclude` in `pyproject.toml`      | `uv export --locked --no-emit-local --package <name>` → pip-audit on the resulting requirements file (Phase 2-C-1) |
+| **yarn (Berry)** | `package.json#packageManager: "yarn@2+"` / `__metadata:` in yarn.lock / `.yarnrc.yml` | `yarn workspace <name> npm audit --json --recursive` (Phase 2-C-2) |
+| **yarn (Classic)** | `# yarn lockfile v1` header                                      | **unsupported**, warning emitted (upgrade to Berry or switch to npm/pnpm) |
 
 Properties that make this safe for monorepos:
 
@@ -342,6 +344,22 @@ Secrets and SAST scanners are not workspace-aware; they always scan the
 whole repo root as a single unit (file content doesn't follow
 ecosystem boundaries).
 
+### Cross-tool baseline compatibility
+
+If you migrate between package managers (e.g. yarn → pnpm, npm → yarn
+Berry), an existing baseline keeps working: secscan picks the canonical
+advisory identifier in the same order across npm / pnpm / yarn —
+**GHSA → CVE → URL → numeric id** — so the same advisory in any of
+those reports hashes to the same fingerprint.
+
+### Threat model note for Yarn Berry
+
+`.yarnrc.yml` may set `yarnPath` to an arbitrary JavaScript file that
+yarn then executes. secscan treats the `yarn` CLI (and the binary it
+points at) as trusted, same way it trusts `npm`, `pnpm`, `pip-audit`,
+and `semgrep`. **Do not** run `secscan deps` against an untrusted
+project root.
+
 ## Known limitations
 
 - No DAST yet — `secscan dast` is reserved for a future release.
@@ -349,9 +367,10 @@ ecosystem boundaries).
   it with an instructive error telling the user to upgrade to npm v7+.
 - pip-audit cannot consume `uv.lock` / `pdm.lock` directly. The scanner
   errors out with a hint to `uv export` / `pdm export` to
-  requirements.txt first.
-- yarn workspaces are not supported; pnpm or npm workspaces are
-  recommended.
+  requirements.txt first. (uv workspaces are handled per member
+  automatically via `uv export --locked`.)
+- Yarn Classic (v1) is unsupported; upgrade to Yarn Berry (v2+) or
+  switch to pnpm / npm.
 
 ## License
 
