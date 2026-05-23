@@ -265,14 +265,15 @@ def detect_uv_workspace(root: ResolvedRoot) -> WorkspaceExpansion | None:
 # PEP 503 normalization: package distribution names are case-insensitive
 # and treat any run of ``-_.`` as equivalent to a single ``-``.
 _PEP503_SEPARATOR = re.compile(r"[-_.]+")
-# PEP 508 distribution name: letter/digit at both ends, with optional
-# letter/digit/underscore/hyphen/dot in between. The lookahead form
-# refuses trailing separators (``foo-`` / ``foo.`` / ``foo_``) which
-# Codex 24th review flagged as accepted by the old looser regex but
-# rejected by uv/pip themselves.
-_VALID_DIST_NAME = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9]|[_.-](?=[A-Za-z0-9]))*$"
-)
+# PEP 508 distribution name: letter/digit at both ends; in between, any
+# letter/digit or run of ``_/-/.`` separators is allowed (including
+# adjacent separators such as ``foo--bar`` and ``foo..bar``, which the
+# spec accepts even if they look odd). Codex 25th review caught the
+# previous lookahead form's over-rejection of those adjacent
+# separators; this looser body but stricter boundary form matches what
+# pip/uv's own validators accept. 1-char names like ``x`` are also
+# valid per PEP 508 (the ``?`` makes the inner group optional).
+_VALID_DIST_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
 def _canonicalize_pep503(name: str) -> str:

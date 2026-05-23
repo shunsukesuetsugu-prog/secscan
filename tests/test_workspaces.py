@@ -361,7 +361,7 @@ def test_uv_workspace_rejects_invalid_member_name(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("bad_name", ["foo-", "foo.", "foo_", "1foo!", "@foo"])
+@pytest.mark.parametrize("bad_name", ["foo-", "foo.", "foo_", "@foo", "foo!"])
 def test_uv_workspace_rejects_trailing_separator_or_invalid_chars(
     tmp_path: Path, bad_name: str
 ) -> None:
@@ -377,6 +377,40 @@ def test_uv_workspace_rejects_trailing_separator_or_invalid_chars(
     assert bad_name not in workspace_ids
     # And a canonicalized form of the bad name also shouldn't be emitted.
     assert not any(bad_name.lower().startswith(wid) for wid in workspace_ids if wid)
+
+
+@pytest.mark.parametrize(
+    "valid_name",
+    [
+        "x",                # single character (legal per PEP 508).
+        "foo",
+        "Foo",              # mixed case canonicalizes to "foo".
+        "foo-bar",
+        "foo.bar",
+        "foo_bar",
+        "foo--bar",         # adjacent hyphens are LEGAL (Codex 25th).
+        "foo..bar",         # adjacent dots also legal.
+        "foo.bar-baz_qux",  # mixed separators.
+        "1foo",             # digit-leading is fine.
+    ],
+)
+def test_uv_workspace_accepts_valid_pep508_names(
+    tmp_path: Path, valid_name: str
+) -> None:
+    """Codex 25th review: the validation must accept every name that
+    pip/uv would. Adjacent separators were over-rejected by the
+    previous regex; pin them as valid here so we don't regress."""
+    _write_uv_pyproject(tmp_path, members=["packages/*"])
+    _write_uv_member(tmp_path, "packages/m", valid_name)
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    workspace_ids = {u.workspace_id for u in expansion.units}
+    # The canonical form (PEP 503) should appear in the unit list.
+    from secscan.workspaces import _canonicalize_pep503
+
+    assert _canonicalize_pep503(valid_name) in workspace_ids
 
 
 def test_uv_workspace_includes_root_as_member(tmp_path: Path) -> None:
