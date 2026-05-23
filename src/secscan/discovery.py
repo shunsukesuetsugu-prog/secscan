@@ -87,8 +87,15 @@ def _detect_npm(root: Path) -> WorkUnit | None:
         return None
     # Lockfile preference order matches what npm/pnpm themselves prefer:
     # pnpm > npm package-lock > shrinkwrap. We don't currently scan yarn.lock
-    # in MVP — yarn audit semantics differ enough that Phase 1B will decide.
-    for lockname in ("pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json"):
+    # in MVP — yarn audit semantics differ enough that Phase 1C will decide.
+    # ``package_manager`` is set from the lockfile choice so the deps
+    # adapter can pick the right CLI (npm/pnpm have different audit flags).
+    lockfile_to_pm: dict[str, str] = {
+        "pnpm-lock.yaml": "pnpm",
+        "package-lock.json": "npm",
+        "npm-shrinkwrap.json": "npm",
+    }
+    for lockname, pm in lockfile_to_pm.items():
         candidate = root / lockname
         if candidate.is_file():
             return WorkUnit(
@@ -96,8 +103,17 @@ def _detect_npm(root: Path) -> WorkUnit | None:
                 ecosystem="npm",
                 manifest=manifest,
                 lockfile=candidate,
+                package_manager=pm,
             )
-    return WorkUnit(root=root, ecosystem="npm", manifest=manifest, lockfile=None)
+    # No lockfile: default to npm (more widely deployed). The adapter still
+    # respects ``allow_missing_lockfile`` before deciding to run.
+    return WorkUnit(
+        root=root,
+        ecosystem="npm",
+        manifest=manifest,
+        lockfile=None,
+        package_manager="npm",
+    )
 
 
 def _detect_pypi(root: Path) -> WorkUnit | None:
@@ -117,32 +133,41 @@ def _detect_pypi(root: Path) -> WorkUnit | None:
 
     manifest: Path | None
     lockfile: Path | None
+    package_manager: str
     if pyproject.is_file():
         manifest = pyproject
-        # uv/pdm style locks
-        for lockname in ("uv.lock", "pdm.lock", "pylock.toml"):
+        # uv/pdm style locks. The package_manager hint matches the lockfile
+        # producer so the adapter can decide whether `pip-audit --project`
+        # is meaningful (it understands pylock.toml natively from 2.10+).
+        pm_by_lock = {"uv.lock": "uv", "pdm.lock": "pdm", "pylock.toml": "pip"}
+        lockfile = None
+        package_manager = "pip"  # pyproject without lock → fall back to pip
+        for lockname, pm in pm_by_lock.items():
             candidate = root / lockname
             if candidate.is_file():
                 lockfile = candidate
+                package_manager = pm
                 break
-        else:
-            lockfile = None
     elif req_main.is_file():
         manifest = req_main
         lockfile = req_main  # requirements.txt itself doubles as a lock-ish file
+        package_manager = "pip-requirements"
     elif setup_py.is_file():
         manifest = setup_py
         lockfile = None
+        package_manager = "pip"
     else:
         # requirements*.txt only (no requirements.txt by canonical name)
         manifest = next(iter(sorted(root.glob("requirements*.txt"))), None)
         lockfile = manifest
+        package_manager = "pip-requirements"
 
     return WorkUnit(
         root=root,
         ecosystem="pypi",
         manifest=manifest,
         lockfile=lockfile,
+        package_manager=package_manager,
     )
 
 

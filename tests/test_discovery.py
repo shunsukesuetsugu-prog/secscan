@@ -49,6 +49,7 @@ def test_deps_detects_npm_with_package_lock(tmp_path: Path) -> None:
     npms = [w for w in discovery.work_units if w.ecosystem == "npm"]
     assert len(npms) == 1
     assert npms[0].lockfile == (tmp_path / "package-lock.json").resolve()
+    assert npms[0].package_manager == "npm"
 
 
 def test_deps_prefers_pnpm_lockfile_over_npm(tmp_path: Path) -> None:
@@ -59,19 +60,24 @@ def test_deps_prefers_pnpm_lockfile_over_npm(tmp_path: Path) -> None:
     (npm,) = [w for w in discover_for_scanner("deps", root).work_units if w.ecosystem == "npm"]
     assert npm.lockfile is not None
     assert npm.lockfile.name == "pnpm-lock.yaml"
+    # CRITICAL: the package_manager must follow the lockfile, not stay "npm".
+    # pnpm has different --audit-level semantics than npm and the adapter
+    # picks the CLI by package_manager.
+    assert npm.package_manager == "pnpm"
 
 
-def test_deps_npm_without_lockfile(tmp_path: Path) -> None:
+def test_deps_npm_without_lockfile_defaults_to_npm(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text("{}")
     root = resolve_scan_root(tmp_path)
     (npm,) = [w for w in discover_for_scanner("deps", root).work_units if w.ecosystem == "npm"]
     assert npm.lockfile is None
+    assert npm.package_manager == "npm"
 
 
 # --- deps: pypi ------------------------------------------------------------
 
 
-def test_deps_detects_pypi_pyproject(tmp_path: Path) -> None:
+def test_deps_detects_pypi_pyproject_with_uv_lock(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
     (tmp_path / "uv.lock").write_text("")
     root = resolve_scan_root(tmp_path)
@@ -80,6 +86,15 @@ def test_deps_detects_pypi_pyproject(tmp_path: Path) -> None:
     assert pypi.manifest.name == "pyproject.toml"
     assert pypi.lockfile is not None
     assert pypi.lockfile.name == "uv.lock"
+    assert pypi.package_manager == "uv"
+
+
+def test_deps_detects_pypi_pyproject_with_pdm_lock(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    (tmp_path / "pdm.lock").write_text("")
+    root = resolve_scan_root(tmp_path)
+    (pypi,) = [w for w in discover_for_scanner("deps", root).work_units if w.ecosystem == "pypi"]
+    assert pypi.package_manager == "pdm"
 
 
 def test_deps_detects_pypi_requirements_txt(tmp_path: Path) -> None:
@@ -90,6 +105,7 @@ def test_deps_detects_pypi_requirements_txt(tmp_path: Path) -> None:
     assert pypi.manifest.name == "requirements.txt"
     # requirements.txt is its own "lock-ish" file in MVP.
     assert pypi.lockfile == pypi.manifest
+    assert pypi.package_manager == "pip-requirements"
 
 
 def test_deps_detects_pypi_setup_py_only(tmp_path: Path) -> None:
@@ -99,6 +115,7 @@ def test_deps_detects_pypi_setup_py_only(tmp_path: Path) -> None:
     assert pypi.manifest is not None
     assert pypi.manifest.name == "setup.py"
     assert pypi.lockfile is None
+    assert pypi.package_manager == "pip"
 
 
 def test_deps_detects_pypi_non_canonical_requirements_only(tmp_path: Path) -> None:

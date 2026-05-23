@@ -43,10 +43,11 @@ from .path_safety import PathSafetyError, resolve_scan_root
 from .reporter import ReportOptions, render_report
 from .runner import SubprocessCommandRunner
 from .scanners.base import Scanner
+from .scanners.deps_scanner import DepsScanner
 from .scanners.secrets import SecretsScanner
 
-# Registry of scanners available in this build. Phase 1B/1C will append.
-ALL_SCANNERS: list[type[Scanner]] = [SecretsScanner]
+# Registry of scanners available in this build. Phase 1C will append sast.
+ALL_SCANNERS: list[type[Scanner]] = [SecretsScanner, DepsScanner]
 """Currently-implemented Scanner classes.
 
 When a subcommand maps to a scanner NOT in this list (e.g. ``secscan deps``

@@ -17,6 +17,7 @@ where needed. Goals:
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -169,45 +170,152 @@ def test_tool_not_installed_exits_with_scan_error(
     assert "scanner errors" in out
 
 
-def test_all_warns_and_fails_when_deps_or_sast_missing(
+def test_all_warns_and_fails_when_sast_missing(
     project: Path,
     stub_gitleaks_installed: None,
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # In Phase 1A, secrets is registered but deps/sast are not. The user
-    # asked for "all"; getting a quiet exit 0 would be a false green. The
-    # CLI must surface the gap and refuse to claim success.
-    scripted_runner.queue(returncode=0, stdout=b"[]")
-    scripted_runner.queue(returncode=0, stdout=b"")
+    # Phase 1B added deps; only sast is still missing. The CLI must still
+    # surface the gap and refuse to claim success.
+    scripted_runner.queue(returncode=0, stdout=b"[]")  # gitleaks (no leaks)
+    scripted_runner.queue(returncode=0, stdout=b"")  # gitleaks version probe
     rc = cli.main(["all", "--path", str(project)])
     out = capsys.readouterr().out
     assert rc == int(ExitCode.SCAN_ERROR)
     assert "partial scan" in out
-    # Both missing scanners listed in the warning, deps + sast.
-    assert "deps" in out
     assert "sast" in out
+    # deps is now registered, so it must NOT appear in the missing-list.
+    # (deps may run with "no manifest" warning, but that's a separate path.)
+    # Check this by looking at the partial-scan warning content, not the
+    # whole output (which may mention "deps" in other contexts).
+    partial_line = next(
+        (line for line in out.splitlines() if "partial scan" in line), ""
+    )
+    assert "deps" not in partial_line
 
 
-def test_all_with_explicit_skip_does_not_treat_skipped_as_missing(
+def test_all_with_explicit_skip_sast_does_not_treat_skipped_as_missing(
     project: Path,
     stub_gitleaks_installed: None,
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # User explicitly opts out of deps/sast — that's an acknowledged gap,
-    # not an "implementation missing" gap. Result should be a clean OK
-    # (assuming secrets finds nothing).
-    scripted_runner.queue(returncode=0, stdout=b"[]")
+    # User explicitly opts out of sast — that's an acknowledged gap.
+    scripted_runner.queue(returncode=0, stdout=b"[]")  # gitleaks
     scripted_runner.queue(returncode=0, stdout=b"")
-    rc = cli.main(
-        ["all", "--path", str(project), "--skip", "deps", "--skip", "sast"]
-    )
+    rc = cli.main(["all", "--path", str(project), "--skip", "sast"])
     out = capsys.readouterr().out
     assert rc == int(ExitCode.OK)
-    # The warning about implementation gaps should NOT appear when the
-    # gap is acknowledged via --skip.
     assert "partial scan" not in out
+
+
+def test_deps_subcommand_npm_with_lockfile(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Stub `which` so DepsScanner finds npm, then verify an empty audit
+    # report yields a clean exit through the full CLI path.
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda name: f"/usr/local/bin/{name}",
+    )
+    (project / "package.json").write_text("{}")
+    (project / "package-lock.json").write_text("{}")
+    scripted_runner.queue(
+        returncode=0,
+        stdout=json.dumps({"vulnerabilities": {}, "metadata": {}}).encode(),
+    )
+    rc = cli.main(["deps", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    assert "no findings" in out
+
+
+def test_deps_subcommand_npm_finding_drives_exit_code(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    (project / "package.json").write_text("{}")
+    (project / "package-lock.json").write_text("{}")
+    audit = json.dumps(
+        {
+            "vulnerabilities": {
+                "lodash": {
+                    "name": "lodash",
+                    "severity": "high",
+                    "via": [
+                        {
+                            "url": "https://github.com/advisories/GHSA-FOO",
+                            "title": "Prototype pollution",
+                            "severity": "high",
+                            "cve": "CVE-2024-LODASH",
+                        }
+                    ],
+                    "fixAvailable": {"name": "lodash", "version": "4.17.21"},
+                }
+            }
+        }
+    ).encode()
+    scripted_runner.queue(returncode=0, stdout=audit)
+    rc = cli.main(["deps", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.FINDINGS)
+    assert "lodash" in out
+
+
+def test_deps_subcommand_warns_without_manifest(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # No manifest in the project root → Discovery emits no WorkUnits,
+    # which becomes a discovery warning. The scan still exits OK (no
+    # findings, no errors) because there's nothing to actually scan.
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    rc = cli.main(["deps", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    assert "no dependency manifest" in out
+
+
+def test_deps_subcommand_without_lockfile_errors(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    (project / "package.json").write_text("{}")
+    rc = cli.main(["deps", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "lockfile" in out
+
+
+def test_deps_subcommand_allow_missing_lockfile_proceeds(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    (project / "package.json").write_text("{}")
+    scripted_runner.queue(
+        returncode=0,
+        stdout=json.dumps({"vulnerabilities": {}, "metadata": {}}).encode(),
+    )
+    rc = cli.main(
+        ["deps", "--path", str(project), "--allow-missing-lockfile"]
+    )
+    capsys.readouterr()
+    assert rc == int(ExitCode.OK)
 
 
 def test_quiet_emits_single_line(
@@ -482,24 +590,17 @@ def test_help_exits_cleanly() -> None:
 # --- Codex 3rd review regressions -----------------------------------------
 
 
-def test_deps_subcommand_rejected_when_scanner_not_registered(
+def test_sast_subcommand_still_rejected_until_phase_1c(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Phase 1A registers only the secrets scanner. The deps subcommand must
-    # NOT silently exit 0 — that would be a false green in CI.
-    rc = cli.main(["deps", "--path", str(project)])
-    captured = capsys.readouterr()
-    assert rc == int(ExitCode.SCAN_ERROR)
-    assert "not yet implemented" in captured.err
-
-
-def test_sast_subcommand_rejected_when_scanner_not_registered(
-    project: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+    # Phase 1B added deps but not sast. Sast must still hit the
+    # false-green guard.
     rc = cli.main(["sast", "--path", str(project)])
     captured = capsys.readouterr()
     assert rc == int(ExitCode.SCAN_ERROR)
     assert "not yet implemented" in captured.err
+
+
 
 
 def test_fail_on_none_never_fails(

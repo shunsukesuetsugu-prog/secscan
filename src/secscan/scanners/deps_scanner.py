@@ -1,0 +1,241 @@
+"""Dependency-CVE scanner (orchestrator-facing).
+
+This class is the dispatch layer over the per-tool adapters in
+``scanners/deps/``. ``is_applicable`` filters WorkUnits down to those with
+an ecosystem we support; ``scan`` selects the adapter based on
+``WorkUnit.package_manager`` and runs the corresponding external tool.
+
+The scanner enforces lockfile policy locally:
+- ecosystems where a lockfile is mandatory (npm, pnpm) fail with a
+  scanner-level error when none is present unless ``allow_missing_lockfile``
+  is True in ScanConfig.extra.
+- pip-audit handles a missing lockfile more gracefully via ``--strict``,
+  but we surface a warning so the user knows the result is less precise.
+"""
+
+from __future__ import annotations
+
+import shutil
+from collections.abc import Callable
+from typing import ClassVar
+
+from ..models import (
+    Finding,
+    ScanConfig,
+    ScannerError,
+    ScanOutcome,
+    WorkUnit,
+)
+from ..redact import redact_text, truncate
+from ..runner import CommandResult, CommandRunner, decode_output
+from .base import Scanner, ToolNotFoundError
+from .deps.npm import (
+    NPM_AUDIT_ARGV,
+    build_findings_from_npm_audit,
+    classify_npm_audit_exit,
+)
+from .deps.pip_audit import (
+    build_findings_from_pip_audit,
+    classify_pip_audit_exit,
+    pip_audit_argv,
+)
+from .deps.pnpm import (
+    PNPM_AUDIT_ARGV,
+    build_findings_from_pnpm_audit,
+    classify_pnpm_audit_exit,
+)
+
+_Classifier = Callable[[CommandResult], tuple[bool, str | None]]
+_Builder = Callable[[bytes], tuple[Finding, ...]]
+
+_SUPPORTED_ECOSYSTEMS = frozenset({"npm", "pypi"})
+
+# Which package managers require a lockfile to produce meaningful output.
+# Without one, ``allow_missing_lockfile`` must be True or we error out.
+_PMS_REQUIRING_LOCKFILE = frozenset({"npm", "pnpm"})
+
+
+class DepsScanner(Scanner):
+    name: ClassVar[str] = "deps"
+    # The "tool" varies per WorkUnit; we keep these for the Scanner contract
+    # but actual executable checks happen per-adapter below.
+    tool_executable: ClassVar[str] = "deps (npm/pnpm/pip-audit)"
+    install_hint: ClassVar[str] = (
+        "install the relevant package manager(s): npm v7+, pnpm v8+, "
+        "and/or pip-audit (`pip install pip-audit` or `secscan[deps]`)"
+    )
+
+    def is_applicable(self, unit: WorkUnit) -> bool:
+        return unit.ecosystem in _SUPPORTED_ECOSYSTEMS
+
+    def scan(
+        self,
+        unit: WorkUnit,
+        runner: CommandRunner,
+        config: ScanConfig,
+    ) -> ScanOutcome:
+        package_manager = unit.package_manager
+        if package_manager is None:
+            return _make_error(
+                "deps scanner received a WorkUnit without a package_manager"
+            )
+
+        allow_missing = bool(config.extra.get("allow_missing_lockfile", False))
+
+        if package_manager == "npm":
+            return self._run_npm_like(
+                unit=unit,
+                runner=runner,
+                config=config,
+                argv=NPM_AUDIT_ARGV,
+                tool="npm",
+                allow_missing_lockfile=allow_missing,
+                classifier=classify_npm_audit_exit,
+                builder=build_findings_from_npm_audit,
+            )
+        if package_manager == "pnpm":
+            return self._run_npm_like(
+                unit=unit,
+                runner=runner,
+                config=config,
+                argv=PNPM_AUDIT_ARGV,
+                tool="pnpm",
+                allow_missing_lockfile=allow_missing,
+                classifier=classify_pnpm_audit_exit,
+                builder=build_findings_from_pnpm_audit,
+            )
+        if package_manager in {"pip", "uv", "pdm", "pip-requirements"}:
+            return self._run_pip_audit(unit=unit, runner=runner, config=config)
+
+        return _make_error(
+            f"deps scanner does not know how to handle package_manager={package_manager!r}"
+        )
+
+    # --- npm / pnpm path ---------------------------------------------------
+
+    def _run_npm_like(
+        self,
+        *,
+        unit: WorkUnit,
+        runner: CommandRunner,
+        config: ScanConfig,
+        argv: tuple[str, ...],
+        tool: str,
+        allow_missing_lockfile: bool,
+        classifier: _Classifier,
+        builder: _Builder,
+    ) -> ScanOutcome:
+        if shutil.which(tool) is None:
+            raise ToolNotFoundError(
+                tool,
+                f"install {tool} (e.g. via Node.js's package manager) and ensure it is on PATH",
+            )
+
+        if (
+            unit.lockfile is None
+            and tool in _PMS_REQUIRING_LOCKFILE
+            and not allow_missing_lockfile
+        ):
+            return _make_error(
+                f"{tool} requires a lockfile to produce a meaningful audit; "
+                f"none found under {unit.root}. Use --allow-missing-lockfile to scan anyway.",
+                returncode=None,
+            )
+
+        result = runner.run(
+            argv,
+            cwd=unit.root,
+            timeout_seconds=config.timeout_seconds,
+        )
+        ok, error_reason = classifier(result)
+        if not ok:
+            return _make_error(
+                error_reason or f"{tool} audit failed",
+                stderr=result.stderr,
+                returncode=result.returncode,
+                duration=result.duration_seconds,
+            )
+        findings = builder(result.stdout)
+        return ScanOutcome(
+            scanner=self.name,
+            findings=findings,
+            tool_version=None,  # Phase 1C: probe per-tool version
+            duration_seconds=result.duration_seconds,
+        )
+
+    # --- pip-audit path ----------------------------------------------------
+
+    def _run_pip_audit(
+        self,
+        *,
+        unit: WorkUnit,
+        runner: CommandRunner,
+        config: ScanConfig,
+    ) -> ScanOutcome:
+        if shutil.which("pip-audit") is None:
+            raise ToolNotFoundError(
+                "pip-audit",
+                "install pip-audit (`pip install pip-audit` or "
+                "`pip install 'secscan[deps]'`) and ensure it is on PATH",
+            )
+
+        requirements_arg: str | None = None
+        if unit.lockfile is not None:
+            requirements_arg = str(unit.lockfile)
+        elif unit.manifest is not None and unit.manifest.name.endswith(".txt"):
+            requirements_arg = str(unit.manifest)
+        # pyproject-only projects (no lockfile, no requirements.txt) fall
+        # through with requirements_arg=None — pip-audit will use the
+        # active environment + --strict to surface dependency-resolution
+        # failures rather than silently miss them.
+
+        argv = pip_audit_argv(lockfile_or_requirements=requirements_arg)
+        result = runner.run(
+            argv,
+            cwd=unit.root,
+            timeout_seconds=config.timeout_seconds,
+        )
+        ok, error_reason = classify_pip_audit_exit(result)
+        if not ok:
+            return _make_error(
+                error_reason or "pip-audit failed",
+                stderr=result.stderr,
+                returncode=result.returncode,
+                duration=result.duration_seconds,
+            )
+        findings = build_findings_from_pip_audit(result.stdout)
+        return ScanOutcome(
+            scanner=self.name,
+            findings=findings,
+            tool_version=None,
+            duration_seconds=result.duration_seconds,
+        )
+
+
+# --- Helpers ---------------------------------------------------------------
+
+
+def _make_error(
+    reason: str,
+    *,
+    stderr: bytes = b"",
+    returncode: int | None = None,
+    duration: float = 0.0,
+) -> ScanOutcome:
+    """Build a ScanOutcome carrying a redacted, length-bounded error."""
+    excerpt: str | None = None
+    if stderr:
+        excerpt = truncate(redact_text(decode_output(stderr)))
+        if not excerpt:
+            excerpt = None
+    safe_reason = truncate(redact_text(reason), limit=300)
+    return ScanOutcome(
+        scanner="deps",
+        error=ScannerError(
+            scanner="deps",
+            reason=safe_reason,
+            stderr_excerpt=excerpt,
+            returncode=returncode,
+        ),
+        duration_seconds=duration,
+    )

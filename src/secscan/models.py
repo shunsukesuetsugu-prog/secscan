@@ -134,12 +134,22 @@ class WorkUnit:
     one python). Future workspace support will yield many. ``manifest`` and
     ``lockfile`` are scanner hints; ``ecosystem`` is None for scanners that
     don't care about language (secrets, broad SAST).
+
+    ``package_manager`` is a finer-grained discriminator within an ecosystem.
+    Codex's 3rd review flagged that pushing both ``npm`` and ``pnpm`` under
+    ``ecosystem="npm"`` would break Phase 1B because the two tools have
+    materially different ``--audit-level`` semantics. We carry the package
+    manager explicitly so Scanner adapters can pick the right CLI shape.
     """
 
     root: Path
     ecosystem: str | None = None
     manifest: Path | None = None
     lockfile: Path | None = None
+    package_manager: str | None = None
+    """For npm-ecosystem: "npm" | "pnpm". For pypi: "pip" | "uv" | "pdm" |
+    "pip-requirements". None when ``ecosystem`` is None or the package
+    manager could not be determined."""
 
 
 @dataclass(frozen=True)
