@@ -92,14 +92,16 @@ def classify_npm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     # We only support npm v7+ output (the ``vulnerabilities`` shape). npm
     # v6 used a top-level ``advisories`` map with a different schema and we
     # do not parse it — accepting it here would silently produce zero
-    # findings for v6 users.
-    if "vulnerabilities" not in data and "metadata" not in data:
-        if "advisories" in data:
-            return False, (
-                "npm audit output appears to be from npm v6 (top-level "
-                "'advisories'). secscan supports npm v7+ only — please "
-                "upgrade your Node.js / npm version."
-            )
+    # findings for v6 users. The presence of ``advisories`` on its own is a
+    # strong signal for v6, even if ``metadata`` is also present (Codex
+    # 10th review flagged that ``metadata`` alone passed the previous gate).
+    if "advisories" in data and "vulnerabilities" not in data:
+        return False, (
+            "npm audit output appears to be from npm v6 (top-level "
+            "'advisories'). secscan supports npm v7+ only — please "
+            "upgrade your Node.js / npm version."
+        )
+    if "vulnerabilities" not in data:
         return False, "npm audit JSON did not contain expected report fields"
     return True, None
 

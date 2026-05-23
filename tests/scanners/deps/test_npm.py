@@ -90,6 +90,23 @@ def test_classify_rejects_npm_v6_shape() -> None:
     assert "v6" in err or "v7+" in err
 
 
+def test_classify_rejects_npm_v6_shape_even_with_metadata() -> None:
+    """Codex 10th review: a v6-shaped payload that ALSO contains
+    ``metadata`` previously slipped past the classifier because the gate
+    accepted either marker. The presence of ``advisories`` without
+    ``vulnerabilities`` is the authoritative v6 signal."""
+    v6_payload = json.dumps(
+        {
+            "advisories": {"1234": {"id": 1234, "title": "old shape"}},
+            "metadata": {"vulnerabilities": {"high": 1}},
+        }
+    ).encode()
+    ok, err = classify_npm_audit_exit(_result(returncode=1, stdout=v6_payload))
+    assert not ok
+    assert err is not None
+    assert "v6" in err or "v7+" in err
+
+
 def test_classify_marks_timeout() -> None:
     ok, err = classify_npm_audit_exit(_result(timed_out=True))
     assert not ok
