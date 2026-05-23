@@ -587,6 +587,128 @@ def test_baseline_accept_all_writes_entries(
 # --- Argparse error paths --------------------------------------------------
 
 
+# --- Phase 2-A: --format / --output / --sarif-include-suppressed ---------
+
+
+def test_format_json_emits_machine_readable_payload(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    rc = cli.main(["secrets", "--path", str(project), "--format", "json"])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    payload = json.loads(out)
+    assert payload["schema"] == "secscan-json"
+    assert payload["format_version"] == 1
+    assert payload["exit_code"] == int(ExitCode.OK)
+
+
+def test_format_sarif_emits_valid_sarif(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    rc = cli.main(["secrets", "--path", str(project), "--format", "sarif"])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    payload = json.loads(out)
+    assert payload["version"] == "2.1.0"
+    assert "$schema" in payload
+    assert "runs" in payload
+
+
+def test_quiet_with_json_is_rejected(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Codex 17th review: --quiet is text-only. Mixing with json/sarif
+    used to silently produce broken artifacts; now it errors."""
+    rc = cli.main(
+        ["secrets", "--path", str(project), "--format", "json", "--quiet"]
+    )
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "quiet" in captured.err.lower()
+
+
+def test_quiet_with_sarif_is_rejected(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = cli.main(
+        ["secrets", "--path", str(project), "--format", "sarif", "--quiet"]
+    )
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "quiet" in captured.err.lower()
+
+
+def test_output_writes_to_file(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    out_file = tmp_path / "report.json"
+    rc = cli.main(
+        [
+            "secrets",
+            "--path",
+            str(project),
+            "--format",
+            "json",
+            "--output",
+            str(out_file),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.OK)
+    # Nothing on stdout when --output is set.
+    assert captured.out == ""
+    assert out_file.exists()
+    payload = json.loads(out_file.read_text())
+    assert payload["schema"] == "secscan-json"
+
+
+def test_output_to_unwritable_path_returns_scan_error(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    # A directory we don't have permission to write to / that doesn't exist.
+    rc = cli.main(
+        [
+            "secrets",
+            "--path",
+            str(project),
+            "--format",
+            "json",
+            "--output",
+            "/nonexistent-directory-xyz/report.json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "--output" in captured.err
+
+
 def test_unknown_command_exits_via_argparse() -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["bogus"])

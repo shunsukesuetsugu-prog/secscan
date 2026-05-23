@@ -37,10 +37,11 @@ from .baseline import (
 )
 from .config import ConfigError, ProjectConfig, load_config
 from .exit_codes import ExitCode
+from .formatters import FormatOptions, format_for
+from .formatters.base import known_format_names
 from .models import Severity
 from .orchestrator import run_scanners
 from .path_safety import PathSafetyError, resolve_scan_root
-from .reporter import ReportOptions, render_report
 from .runner import SubprocessCommandRunner
 from .scanners.base import Scanner
 from .scanners.deps_scanner import DepsScanner
@@ -181,6 +182,27 @@ def _add_common_scan_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="show suppressed findings and extended metadata.",
     )
+    parser.add_argument(
+        "--format",
+        choices=sorted(known_format_names()),
+        default="text",
+        help="output format (default: text). json/sarif are mutually exclusive with --quiet.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        metavar="FILE",
+        help="write the formatted report to FILE instead of stdout.",
+    )
+    parser.add_argument(
+        "--sarif-include-suppressed",
+        action="store_true",
+        help=(
+            "include baseline-suppressed findings in SARIF output (default: "
+            "excluded; GitHub Code Scanning does not consistently honor "
+            "SARIF suppressions)."
+        ),
+    )
 
 
 # --- Dispatch --------------------------------------------------------------
@@ -277,13 +299,41 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
     else:
         final_decision = outcome.decision
 
-    options = ReportOptions(
-        use_color=_should_use_color(args, sys.stdout),
+    format_name = getattr(args, "format", "text")
+    quiet = getattr(args, "quiet", False)
+
+    # Codex 17th review: --quiet is text-only. Combining it with a
+    # structured format would silently fall back and produce a broken
+    # artifact for downstream tooling, so we error out instead.
+    if quiet and format_name != "text":
+        _print_error(
+            f"--quiet is only valid with --format=text; got --format={format_name}"
+        )
+        return int(ExitCode.SCAN_ERROR)
+
+    options = FormatOptions(
+        use_color=_should_use_color(args, sys.stdout) and format_name == "text",
         verbose=getattr(args, "verbose", False),
-        quiet=getattr(args, "quiet", False),
+        quiet=quiet,
+        include_suppressed_in_sarif=getattr(
+            args, "sarif_include_suppressed", False
+        ),
     )
-    sys.stdout.write(render_report(final_result, final_decision, options))
-    sys.stdout.write("\n")
+    rendered = format_for(format_name)(final_result, final_decision, options)
+
+    output_path = getattr(args, "output", None)
+    if output_path is None:
+        sys.stdout.write(rendered)
+        # Preserve the historical trailing newline for text-format stdout;
+        # json/sarif formatters already terminate with a newline themselves.
+        if format_name == "text" and not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        try:
+            Path(output_path).write_text(rendered, encoding="utf-8")
+        except OSError as exc:
+            _print_error(f"could not write --output {output_path}: {exc}")
+            return int(ExitCode.SCAN_ERROR)
     return int(final_decision.exit_code)
 
 

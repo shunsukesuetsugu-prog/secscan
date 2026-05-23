@@ -43,6 +43,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    # Phase 2-A: SARIF schema validation in tests.
+    "jsonschema>=4.20",
     # During Phase 1A development we want both scanners' tools available so
     # the dev environment can be linted / type-checked / smoke-run end-to-end.
     "semgrep>=1.50",
