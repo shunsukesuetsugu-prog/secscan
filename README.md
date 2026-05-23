@@ -76,6 +76,40 @@ secscan deps --no-baseline
 
 # Single-line, CI-friendly output.
 secscan all --quiet
+
+# Machine-readable output formats.
+secscan all --format json                   # secscan-json v1 to stdout
+secscan all --format sarif > scan.sarif     # SARIF 2.1.0 to file via shell
+secscan all --format sarif --output scan.sarif
+
+# Include baseline-suppressed findings in SARIF (default: excluded).
+secscan all --format sarif --sarif-include-suppressed
+```
+
+### Output formats
+
+| Format  | Use case                                                                |
+| ------- | ----------------------------------------------------------------------- |
+| `text`  | Default. Human-readable terminal report. Color when stdout is a TTY.    |
+| `json`  | secscan-json v1. Stable structured schema with counts, errors, suppressed. |
+| `sarif` | SARIF 2.1.0 with per-scanner runs. Ready for GitHub Code Scanning upload. |
+
+`--quiet` is text-only; combining it with `--format=json` or `--format=sarif`
+is a CLI error (the structured formats already produce single-document
+output that's safe to parse).
+
+SARIF caveats worth knowing:
+
+- One `run` per scanner that actually executed. Skipped scanners are **not**
+  emitted as empty success runs — uploading those would mark previously-
+  reported alerts on the missing scanner as fixed.
+- Baseline-suppressed findings are **excluded** by default (GitHub Code
+  Scanning doesn't reliably honor SARIF suppressions). Opt in with
+  `--sarif-include-suppressed` for archive / non-GitHub viewers.
+- `Finding.raw` and `Finding.raw_fingerprint` are **never** in the output
+  (the latter can embed upstream-tool paths that bypass secscan's
+  path-stripping).
+- No source `snippet` or artifact `contents` is emitted.
 ```
 
 ### Exit codes
@@ -253,8 +287,9 @@ specific Codex review iteration that motivated each invariant.
 | 1A    | Common base + `secrets` (gitleaks)                 | done                    |
 | 1B    | `deps` (npm / pnpm / pip-audit)                    | done                    |
 | 1C    | `sast` (semgrep)                                   | done                    |
-| 1D    | docs + final review                                | in progress             |
-| 2     | DAST (OWASP ZAP), monorepo / workspaces, SARIF out | future                  |
+| 1D    | docs + final review                                | done (v0.1.0)           |
+| 2-A   | JSON / SARIF output                                | done (v0.2.0)           |
+| 2-B+  | DAST (OWASP ZAP), monorepo / workspaces            | future                  |
 
 ## Development
 
