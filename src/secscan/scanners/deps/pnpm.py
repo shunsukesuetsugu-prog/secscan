@@ -49,15 +49,24 @@ PNPM_AUDIT_ARGV: tuple[str, ...] = (
 )
 
 
-def pnpm_audit_argv(*, omit_dev: bool = False) -> tuple[str, ...]:
+def pnpm_audit_argv(
+    *, omit_dev: bool = False, workspace_id: str | None = None
+) -> tuple[str, ...]:
     """Construct the pnpm audit invocation.
 
     pnpm uses ``--prod`` to limit the audit to production deps (the
     opposite framing of npm's ``--omit=dev``, but the semantic effect is
     the same in practice). secscan's config key ``ignore_dev_dependencies``
     maps onto this.
+
+    ``workspace_id`` scopes the audit to a single workspace member via
+    pnpm's ``--filter <id>`` selector. The command is invoked from the
+    repo root so pnpm reads the authoritative lockfile, but results are
+    constrained to the named member.
     """
     argv = list(PNPM_AUDIT_ARGV)
+    if workspace_id is not None:
+        argv.extend(("--filter", workspace_id))
     if omit_dev:
         argv.append("--prod")
     return tuple(argv)
@@ -86,7 +95,9 @@ def classify_pnpm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     return True, None
 
 
-def build_findings_from_pnpm_audit(stdout: bytes) -> tuple[Finding, ...]:
+def build_findings_from_pnpm_audit(
+    stdout: bytes, *, workspace_id: str | None = None
+) -> tuple[Finding, ...]:
     text = decode_output(stdout)
     if not text.strip():
         return ()
@@ -110,6 +121,7 @@ def build_findings_from_pnpm_audit(stdout: bytes) -> tuple[Finding, ...]:
             ecosystem="npm",  # pnpm publishes to the same ecosystem
             package=package_name,
             advisory_id=hints.advisory_id,
+            workspace_id=workspace_id,
         )
         if fingerprint in seen:
             continue

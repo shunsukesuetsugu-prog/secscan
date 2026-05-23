@@ -22,7 +22,13 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
-dependencies = []
+dependencies = [
+    # PyYAML is needed by ``discover.py`` to parse pnpm-workspace.yaml when
+    # the user has a pnpm monorepo. It's small (no compiled C deps on
+    # platforms without libyaml) so we keep it as a hard dependency rather
+    # than gating monorepo support behind an extra.
+    "PyYAML>=6.0",
+]
 
 [project.optional-dependencies]
 # Phase 1C will register the sast scanner; install secscan[sast] to bring in
@@ -45,6 +51,8 @@ dev = [
     "mypy>=1.10",
     # Phase 2-A: SARIF schema validation in tests.
     "jsonschema>=4.20",
+    # Phase 2-B: mypy stubs for PyYAML.
+    "types-PyYAML>=6.0",
     # During Phase 1A development we want both scanners' tools available so
     # the dev environment can be linted / type-checked / smoke-run end-to-end.
     "semgrep>=1.50",

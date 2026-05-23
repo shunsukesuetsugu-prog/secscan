@@ -151,6 +151,19 @@ class WorkUnit:
     "pip-requirements". None when ``ecosystem`` is None or the package
     manager could not be determined."""
 
+    workspace_id: str | None = None
+    """In a monorepo, the workspace member's selector (e.g. the package
+    name for npm/pnpm). Forwarded to ``npm audit --workspace <id>`` or
+    ``pnpm audit --filter <id>`` so the audit is scoped to the member
+    even though the run happens at the repo root (Phase 2-B / Codex
+    20th review). None for single-project layouts and for any ecosystem
+    where workspace splitting is not implemented."""
+
+    workspace_member_path: Path | None = None
+    """The workspace member's directory, relative to the scan root.
+    Used for display and to disambiguate findings in reports. None for
+    single-project layouts."""
+
 
 @dataclass(frozen=True)
 class ScannerError:

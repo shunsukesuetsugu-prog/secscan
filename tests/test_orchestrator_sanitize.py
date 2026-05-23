@@ -152,6 +152,113 @@ def test_path_in_ignored_dir_is_stripped(
     assert kept.location.file is None
 
 
+def test_workspace_member_relative_path_is_rewritten_to_repo_root(
+    tmp_path: Path, runner: CommandRunner
+) -> None:
+    """Phase 2-B: a scanner running in a workspace member reports the
+    path relative to ``unit.root`` (the member). The sanitizer must
+    rewrite that to repo-root-relative so reports stay consistent
+    across single-project and monorepo runs."""
+    member = tmp_path / "packages" / "api"
+    member.mkdir(parents=True)
+    (member / "src").mkdir()
+    (member / "src" / "leak.py").write_text("x")
+    finding = _finding_with_path("src/leak.py")
+    scanner = _FakeScanner(
+        outcome=ScanOutcome(scanner="secrets", findings=(finding,))
+    )
+    # Hand the scanner a member-relative WorkUnit so unit.root != scan_root.
+    # The scanner records the path as it was reported; orchestrator must
+    # rewrite it before the Finding leaves the run.
+    from secscan.models import WorkUnit
+
+    scanner.scan = lambda unit, runner, config: ScanOutcome(  # type: ignore[method-assign]
+        scanner="secrets",
+        findings=(_finding_with_path("src/leak.py"),),
+    )
+    # Use a custom Discovery via a fake scanner where is_applicable is True
+    # and we manually drive the orchestrator's path-resolution for the
+    # given unit by monkey-patching the discovery layer in the next test.
+    # Here we hit the same code path more directly: emit a finding from
+    # a workspace WorkUnit-aware unit via the sanitization helper.
+    from secscan.orchestrator import _sanitize_outcome_paths
+    from secscan.path_safety import resolve_scan_root
+
+    resolved = resolve_scan_root(tmp_path)
+    member_unit = WorkUnit(
+        root=tmp_path.resolve(),
+        ecosystem="npm",
+        package_manager="npm",
+        workspace_id="@org/api",
+    )
+    # Pretend the scanner returned the member-relative path.
+    outcome = ScanOutcome(
+        scanner="secrets",
+        findings=(_finding_with_path("packages/api/src/leak.py"),),
+    )
+    cleaned = _sanitize_outcome_paths(outcome, resolved, member_unit)
+    (kept,) = cleaned.findings
+    assert kept.location is not None
+    # Already repo-root-relative path stays unchanged.
+    assert kept.location.file == "packages/api/src/leak.py"
+
+    # And a "member-relative" path is rewritten to repo-root-relative when
+    # the unit reports member root as a sub-path:
+    member_unit = WorkUnit(
+        root=member.resolve(),
+        ecosystem="npm",
+        package_manager="npm",
+        workspace_id="@org/api",
+    )
+    outcome2 = ScanOutcome(
+        scanner="secrets",
+        findings=(_finding_with_path("src/leak.py"),),
+    )
+    cleaned2 = _sanitize_outcome_paths(outcome2, resolved, member_unit)
+    (kept2,) = cleaned2.findings
+    assert kept2.location is not None
+    assert kept2.location.file == "packages/api/src/leak.py"
+
+
+def test_sanitize_strips_all_position_fields_on_outside_path(
+    tmp_path: Path, runner: CommandRunner
+) -> None:
+    """Codex 20th review: stripping just ``file`` and ``line`` leaves
+    stale ``column`` / ``end_line`` / ``end_column``. Pin that all
+    position fields go to None."""
+    from secscan.models import Location
+    from secscan.orchestrator import _sanitize_outcome_paths
+    from secscan.path_safety import resolve_scan_root
+
+    bad = Finding(
+        scanner="secrets",
+        rule_id="r",
+        severity=Severity.HIGH,
+        title="t",
+        message="m",
+        location=Location(
+            file="../../etc/passwd",
+            line=1,
+            end_line=2,
+            column=3,
+            end_column=4,
+        ),
+        fingerprint="fp",
+    )
+    resolved = resolve_scan_root(tmp_path)
+    cleaned = _sanitize_outcome_paths(
+        ScanOutcome(scanner="secrets", findings=(bad,)),
+        resolved,
+    )
+    (kept,) = cleaned.findings
+    assert kept.location is not None
+    assert kept.location.file is None
+    assert kept.location.line is None
+    assert kept.location.end_line is None
+    assert kept.location.column is None
+    assert kept.location.end_column is None
+
+
 def test_finding_without_location_unaffected(
     tmp_path: Path, runner: CommandRunner
 ) -> None:

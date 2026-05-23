@@ -51,6 +51,7 @@ def npm_audit_argv(
     *,
     allow_missing_lockfile: bool = False,
     omit_dev: bool = False,
+    workspace_id: str | None = None,
 ) -> tuple[str, ...]:
     """Construct the npm audit invocation.
 
@@ -60,8 +61,16 @@ def npm_audit_argv(
       ``--allow-missing-lockfile`` CLI flag previously had no actual effect.
     - ``omit_dev``: appends ``--omit=dev`` to skip devDependencies from
       the audit, matching the config's ``ignore_dev_dependencies`` key.
+    - ``workspace_id``: when set, runs the audit scoped to a single
+      workspace member via ``--workspace <id>``. The audit is invoked
+      from the repo root so npm finds the authoritative lockfile, but
+      results are filtered to the member's dependency closure. Codex
+      20th review demanded this — ``cwd=member`` alone would let npm
+      walk up to the root lockfile but produce an unfiltered report.
     """
     argv = list(NPM_AUDIT_ARGV)
+    if workspace_id is not None:
+        argv.extend(("--workspace", workspace_id))
     if allow_missing_lockfile:
         argv.append("--no-package-lock")
     if omit_dev:
@@ -106,13 +115,19 @@ def classify_npm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     return True, None
 
 
-def build_findings_from_npm_audit(stdout: bytes) -> tuple[Finding, ...]:
+def build_findings_from_npm_audit(
+    stdout: bytes, *, workspace_id: str | None = None
+) -> tuple[Finding, ...]:
     """Parse ``npm audit --json`` stdout into normalized Findings.
 
     Caller has already verified the stdout is a well-formed report (via
     ``classify_npm_audit_exit``). This function focuses on the v7+ JSON
     structure and never raises on shape variance — unknown / partial
     advisory objects are skipped, not exploded.
+
+    ``workspace_id`` is forwarded into the per-finding fingerprint so
+    that the same advisory in two different workspace members produces
+    two distinct baseline keys (Codex 20th review).
     """
     text = decode_output(stdout)
     if not text.strip():
@@ -146,6 +161,7 @@ def build_findings_from_npm_audit(stdout: bytes) -> tuple[Finding, ...]:
                 ecosystem="npm",
                 package=pkg_name,
                 advisory_id=hints.advisory_id,
+                workspace_id=workspace_id,
             )
             if fingerprint in seen_fingerprints:
                 continue

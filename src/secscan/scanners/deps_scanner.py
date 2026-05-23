@@ -92,22 +92,29 @@ class DepsScanner(Scanner):
                 argv=npm_audit_argv(
                     allow_missing_lockfile=allow_missing,
                     omit_dev=omit_dev,
+                    workspace_id=unit.workspace_id,
                 ),
                 tool="npm",
                 allow_missing_lockfile=allow_missing,
                 classifier=classify_npm_audit_exit,
-                builder=build_findings_from_npm_audit,
+                builder=lambda stdout: build_findings_from_npm_audit(
+                    stdout, workspace_id=unit.workspace_id
+                ),
             )
         if package_manager == "pnpm":
             return self._run_npm_like(
                 unit=unit,
                 runner=runner,
                 config=config,
-                argv=pnpm_audit_argv(omit_dev=omit_dev),
+                argv=pnpm_audit_argv(
+                    omit_dev=omit_dev, workspace_id=unit.workspace_id
+                ),
                 tool="pnpm",
                 allow_missing_lockfile=allow_missing,
                 classifier=classify_pnpm_audit_exit,
-                builder=build_findings_from_pnpm_audit,
+                builder=lambda stdout: build_findings_from_pnpm_audit(
+                    stdout, workspace_id=unit.workspace_id
+                ),
             )
         if package_manager in {"pip", "uv", "pdm", "pip-requirements"}:
             return self._run_pip_audit(unit=unit, runner=runner, config=config)

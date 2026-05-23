@@ -38,7 +38,13 @@ def severity_from_npm_label(label: object) -> Severity:
     return _NPM_SEVERITY_MAP.get(label.strip().lower(), Severity.UNKNOWN)
 
 
-def deps_fingerprint(*, ecosystem: str, package: str, advisory_id: str) -> str:
+def deps_fingerprint(
+    *,
+    ecosystem: str,
+    package: str,
+    advisory_id: str,
+    workspace_id: str | None = None,
+) -> str:
     """Compose a stable fingerprint for a dependency vulnerability.
 
     The fingerprint is independent of file paths and lockfile contents so
@@ -47,10 +53,29 @@ def deps_fingerprint(*, ecosystem: str, package: str, advisory_id: str) -> str:
     version: a "still vulnerable in a newer range" event SHOULD be
     indistinguishable from the original finding, because the action (fix
     or accept) is the same.
+
+    ``workspace_id`` scopes the fingerprint to a single workspace member
+    in monorepos. Codex 20th review pinned this: without it, the same
+    ``lodash + GHSA`` finding in ``packages/api`` and ``packages/web``
+    would collide on one fingerprint, and ``baseline accept`` of one
+    would silently suppress the other. The root-only scan (no
+    workspace) keeps the legacy ``deps:...`` prefix so existing
+    baselines stay valid; workspace scans use ``deps-ws:...``.
     """
     if not ecosystem or not package or not advisory_id:
         raise ValueError("ecosystem, package, and advisory_id must all be non-empty")
-    payload = "\x00".join(("deps", ecosystem, package.lower(), advisory_id.upper()))
+    if workspace_id:
+        payload = "\x00".join(
+            (
+                "deps-ws",
+                ecosystem,
+                workspace_id.lower(),
+                package.lower(),
+                advisory_id.upper(),
+            )
+        )
+    else:
+        payload = "\x00".join(("deps", ecosystem, package.lower(), advisory_id.upper()))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

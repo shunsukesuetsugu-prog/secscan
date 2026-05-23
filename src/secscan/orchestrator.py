@@ -36,6 +36,7 @@ from .models import (
     ScanConfig,
     ScannerError,
     ScanOutcome,
+    WorkUnit,
 )
 from .path_safety import ResolvedRoot
 from .policy import PolicyDecision, apply_overrides, evaluate
@@ -128,8 +129,11 @@ def run_scanners(
 
             # Verify all reported file paths are inside the scan root.
             # External tools can be tricked or buggy; we don't display paths
-            # we can't vouch for.
-            outcome = _sanitize_outcome_paths(outcome, scan_root)
+            # we can't vouch for. Sanitization is WorkUnit-aware (Phase 2-B
+            # / Codex 20th review): a relative path returned by a workspace
+            # scanner is resolved against ``unit.root``, not ``scan_root``,
+            # so monorepo members report repo-root-relative paths.
+            outcome = _sanitize_outcome_paths(outcome, scan_root, unit)
 
             _accumulate(
                 outcome,
@@ -250,31 +254,64 @@ def _load_baseline_safely(path: Path) -> Baseline | None:
 
 
 def _sanitize_outcome_paths(
-    outcome: ScanOutcome, scan_root: ResolvedRoot
+    outcome: ScanOutcome,
+    scan_root: ResolvedRoot,
+    unit: WorkUnit | None = None,
 ) -> ScanOutcome:
     """Drop scanner Findings that reference files outside the scan root.
 
-    External tools can be coaxed (via symlinks, mis-configured includes, or
-    bugs) to report locations outside ``--path``. Showing those paths is
-    a leak of host filesystem layout and undermines the scan-root contract.
-    We mutate Finding.location.file to None for any unverified path; we do
-    not drop the Finding entirely (a finding without a path is still a
-    real finding worth reporting), but we DO strip the path so the user
-    can't be misled.
+    External tools can be coaxed (via symlinks, mis-configured includes,
+    or bugs) to report locations outside ``--path``. Showing those paths
+    is a leak of host filesystem layout and undermines the scan-root
+    contract. We mutate Finding.location.file to None for any unverified
+    path; we do not drop the Finding entirely (a finding without a path
+    is still a real finding worth reporting), but we DO strip the path
+    so the user can't be misled.
+
+    ``unit`` (Phase 2-B): when provided, relative paths are resolved
+    against ``unit.root`` (which equals the scan root for single-project
+    layouts and the repo root for workspace layouts — secscan always
+    runs workspace audits from the repo root). The previous behavior of
+    resolving everything against ``scan_root`` directly is preserved
+    via the ``unit=None`` default for callers that don't have a unit.
     """
     if outcome.error is not None or not outcome.findings:
         return outcome
-    cleaned: list[Finding] = []
-    for finding in outcome.findings:
-        cleaned.append(_sanitize_finding_path(finding, scan_root))
+    cleaned: list[Finding] = [
+        _sanitize_finding_path(finding, scan_root, unit) for finding in outcome.findings
+    ]
     return dc_replace(outcome, findings=tuple(cleaned))
 
 
-def _sanitize_finding_path(finding: Finding, scan_root: ResolvedRoot) -> Finding:
+def _sanitize_finding_path(
+    finding: Finding,
+    scan_root: ResolvedRoot,
+    unit: WorkUnit | None = None,
+) -> Finding:
     if finding.location is None or finding.location.file is None:
         return finding
-    candidate = scan_root.resolved / finding.location.file
+    raw = Path(finding.location.file)
+    # Anchor relative paths against the WorkUnit's audit-root if we have
+    # one; this matters in workspaces where ``unit.root`` is the repo
+    # root and the scanner returned a member-relative path. For absolute
+    # paths and units without a base, fall back to the scan root.
+    base = unit.root if unit is not None else scan_root.resolved
+    candidate = raw if raw.is_absolute() else (base / raw)
     if not scan_root.contains(candidate) or scan_root.is_ignored(candidate):
-        new_location = dc_replace(finding.location, file=None, line=None, column=None)
+        # Codex 20th review: strip every position field, not just file
+        # and line. A stale ``column``/``end_*`` would still leak the
+        # original (unverified) location's intent.
+        new_location = dc_replace(
+            finding.location,
+            file=None,
+            line=None,
+            end_line=None,
+            column=None,
+            end_column=None,
+        )
         return dc_replace(finding, location=new_location)
-    return finding
+    # Rewrite file to a forward-slash repo-root-relative form so reports
+    # are consistent regardless of which WorkUnit produced the finding.
+    rel = scan_root.relativize(candidate)
+    new_location = dc_replace(finding.location, file=rel)
+    return dc_replace(finding, location=new_location)
