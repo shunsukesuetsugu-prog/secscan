@@ -13,9 +13,11 @@ this module only defines the shape.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from types import MappingProxyType
 
 
 class Severity(IntEnum):
@@ -25,6 +27,12 @@ class Severity(IntEnum):
     severity field at all, and forcing it to MEDIUM (the original draft) was
     flagged as misleading. Policy decides whether ``UNKNOWN`` participates in
     the fail-on threshold; it never silently becomes a known level.
+
+    ``NEVER`` is a sentinel **only used as the fail-on threshold** — it is
+    intentionally above every real severity value so the comparison
+    ``finding.severity >= Severity.NEVER`` is always ``False``. Scanners must
+    never emit findings with ``severity == NEVER`` (this is asserted at the
+    edges in Scanner subclasses).
     """
 
     UNKNOWN = 0
@@ -33,12 +41,20 @@ class Severity(IntEnum):
     MEDIUM = 3
     HIGH = 4
     CRITICAL = 5
+    NEVER = 100
 
     @classmethod
     def from_name(cls, name: str) -> Severity:
-        """Case-insensitive lookup; raises ValueError on unknown name."""
+        """Case-insensitive lookup; raises ValueError on unknown name.
+
+        The CLI-visible alias ``"none"`` maps to ``Severity.NEVER`` so users
+        can write ``--fail-on=none`` to mean "never fail the build".
+        """
+        normalized = name.strip().upper()
+        if normalized == "NONE":
+            return cls.NEVER
         try:
-            return cls[name.strip().upper()]
+            return cls[normalized]
         except KeyError as exc:
             raise ValueError(f"Unknown severity name: {name!r}") from exc
 
@@ -82,10 +98,15 @@ class Location:
 class Finding:
     """A single normalized vulnerability/policy violation.
 
-    Findings are immutable and hashable. ``fingerprint`` identifies the same
-    issue across runs for baseline suppression; ``raw_fingerprint`` preserves
-    the upstream tool's own fingerprint (gitleaks, semgrep AppSec) when
-    available, so we can cross-reference with native ignore mechanisms.
+    Findings are immutable. ``fingerprint`` identifies the same issue across
+    runs for baseline suppression; ``raw_fingerprint`` preserves the upstream
+    tool's own fingerprint (gitleaks, semgrep AppSec) when available, so we
+    can cross-reference with native ignore mechanisms.
+
+    Note: although the dataclass is frozen, instances are NOT hashable: the
+    ``raw`` field carries a dict for SARIF/forensics, and dicts break hash
+    invariance. Code that needs set-like deduplication should key on
+    ``fingerprint`` explicitly.
     """
 
     scanner: str
@@ -101,7 +122,7 @@ class Finding:
     fix_version: str | None = None
     references: tuple[str, ...] = ()
     tool_version: str | None = None
-    raw: dict[str, object] | None = None
+    raw: dict[str, object] | None = field(default=None, hash=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -181,6 +202,9 @@ class RunResult:
         return len(self.errors) > 0
 
 
+_EMPTY_EXTRA: Mapping[str, object] = MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class ScanConfig:
     """Per-scanner runtime config passed into Scanner.scan().
@@ -190,8 +214,12 @@ class ScanConfig:
     """
 
     timeout_seconds: int = 300
-    extra: dict[str, object] = field(default_factory=dict)
+    extra: Mapping[str, object] = field(default_factory=lambda: _EMPTY_EXTRA)
     """Scanner-specific typed options. Each Scanner documents the keys it
     consumes; unknown keys are ignored. We intentionally do NOT accept a
     free-form ``extra_args`` list — Codex flagged this as a command-injection
-    / argument-escape risk."""
+    / argument-escape risk.
+
+    Exposed as ``Mapping`` (read-only contract). Construction sites should
+    pass either ``MappingProxyType({...})`` or an immutable mapping; the
+    field itself does not enforce immutability beyond the type contract."""

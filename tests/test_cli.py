@@ -453,6 +453,87 @@ def test_help_exits_cleanly() -> None:
     assert exc_info.value.code == 0
 
 
+# --- Codex 3rd review regressions -----------------------------------------
+
+
+def test_deps_subcommand_rejected_when_scanner_not_registered(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Phase 1A registers only the secrets scanner. The deps subcommand must
+    # NOT silently exit 0 — that would be a false green in CI.
+    rc = cli.main(["deps", "--path", str(project)])
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "not yet implemented" in captured.err
+
+
+def test_sast_subcommand_rejected_when_scanner_not_registered(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["sast", "--path", str(project)])
+    captured = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "not yet implemented" in captured.err
+
+
+def test_fail_on_none_never_fails(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # --fail-on none used to crash with ValueError. It must accept and mean
+    # "never cross threshold", regardless of findings.
+    leak = json.dumps(
+        [
+            {
+                "RuleID": "x",
+                "Description": "x",
+                "StartLine": 1,
+                "File": "a.py",
+                "Secret": "REDACTED",
+                "Match": "REDACTED",
+            }
+        ]
+    ).encode()
+    scripted_runner.queue(returncode=101, stdout=leak)
+    scripted_runner.queue(returncode=0, stdout=b"")
+    rc = cli.main(["secrets", "--path", str(project), "--fail-on", "none"])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    # The threshold label should reflect the "never" sentinel.
+    assert "never" in out
+
+
+def test_finding_title_is_redacted_not_raw_description(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Even though gitleaks --redact=100 normally redacts the Secret field,
+    # the Description field is not guaranteed to be clean. The title shown
+    # to the user must be redacted, not pass through unchanged.
+    leak = json.dumps(
+        [
+            {
+                "RuleID": "aws-key",
+                "Description": "key AKIAIOSFODNN7EXAMPLE found in src",
+                "StartLine": 1,
+                "File": "a.py",
+                "Secret": "REDACTED",
+                "Match": "REDACTED",
+            }
+        ]
+    ).encode()
+    scripted_runner.queue(returncode=101, stdout=leak)
+    scripted_runner.queue(returncode=0, stdout=b"")
+    cli.main(["secrets", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+    assert "[REDACTED]" in out
+
+
 # --- Helpers ---------------------------------------------------------------
 
 

@@ -22,19 +22,31 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
-dependencies = [
-    # SAST: semgrep is a Python package and ships its CLI.
-    "semgrep>=1.50",
-    # Python dependency CVE scanner.
-    "pip-audit>=2.7",
-]
+dependencies = []
 
 [project.optional-dependencies]
+# Phase 1C will register the sast scanner; install secscan[sast] to bring in
+# semgrep. Keeping it as an extra lets users pick what they need (and avoids
+# pulling a heavy graph for users who only want secrets).
+sast = ["semgrep>=1.50"]
+
+# Phase 1B will register the deps scanner for the PyPI ecosystem; install
+# secscan[deps] for pip-audit. (npm/pnpm dependencies are not Python
+# packages, so they remain a pre-install requirement.)
+deps = ["pip-audit>=2.7"]
+
+# Convenience meta-extra.
+all = ["semgrep>=1.50", "pip-audit>=2.7"]
+
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    # During Phase 1A development we want both scanners' tools available so
+    # the dev environment can be linted / type-checked / smoke-run end-to-end.
+    "semgrep>=1.50",
+    "pip-audit>=2.7",
 ]
 
 [project.scripts]

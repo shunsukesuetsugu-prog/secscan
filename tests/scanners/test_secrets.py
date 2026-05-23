@@ -271,26 +271,43 @@ def test_stderr_excerpt_is_redacted(
 
 
 @pytest.mark.usefixtures("stub_which")
-def test_leak_exit_with_garbage_stdout_synthesizes_parse_error(
+def test_leak_exit_with_garbage_stdout_is_scan_error(
     scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
 ) -> None:
+    # Codex 3rd review: "exit 101 + non-JSON-array stdout" MUST become a
+    # ScannerError, never a false-clean and never a synthetic finding.
     fake_runner.push(returncode=101, stdout=b"not json at all")
     fake_runner.push(returncode=0, stdout=b"")
     outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
-    assert outcome.succeeded
-    assert len(outcome.findings) == 1
-    assert outcome.findings[0].rule_id == "secscan.parse-error"
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "not a JSON array" in outcome.error.reason
 
 
 @pytest.mark.usefixtures("stub_which")
-def test_leak_exit_with_non_array_json_synthesizes_parse_error(
+def test_leak_exit_with_non_array_json_is_scan_error(
     scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
 ) -> None:
     fake_runner.push(returncode=101, stdout=b'{"unexpected": "object"}')
     fake_runner.push(returncode=0, stdout=b"")
     outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
-    assert len(outcome.findings) == 1
-    assert outcome.findings[0].rule_id == "secscan.parse-error"
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "not a JSON array" in outcome.error.reason
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_leak_exit_with_empty_stdout_is_scan_error(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    # Empty stdout on exit 101 used to silently mean "no findings" — that's
+    # a false-clean. Now it MUST be an error.
+    fake_runner.push(returncode=101, stdout=b"")
+    fake_runner.push(returncode=0, stdout=b"")
+    outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "empty" in outcome.error.reason.lower()
 
 
 def test_tool_not_installed_raises_tool_not_found(

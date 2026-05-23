@@ -47,6 +47,15 @@ from .scanners.secrets import SecretsScanner
 
 # Registry of scanners available in this build. Phase 1B/1C will append.
 ALL_SCANNERS: list[type[Scanner]] = [SecretsScanner]
+"""Currently-implemented Scanner classes.
+
+When a subcommand maps to a scanner NOT in this list (e.g. ``secscan deps``
+in Phase 1A), the CLI must NOT silently run zero scanners — that would let
+CI report ``deps`` as clean when it was never actually checked. ``_dispatch``
+explicitly rejects subcommands without a corresponding registered scanner.
+"""
+
+_REGISTERED_NAMES: set[str] = {cls.name for cls in ALL_SCANNERS}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -198,6 +207,17 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
 
     only: tuple[str, ...] | None = None if args.command == "all" else (args.command,)
 
+    # CRITICAL: refuse to run a scanner-specific subcommand if its scanner
+    # isn't registered in this build. Otherwise the user would see
+    # "no findings, exit 0" for a scanner that never actually ran — a false
+    # green that defeats the whole point of a security gate.
+    if only is not None and only[0] not in _REGISTERED_NAMES:
+        _print_error(
+            f"the {only[0]!r} scanner is declared but not yet implemented in this "
+            f"build of secscan. Registered scanners: {sorted(_REGISTERED_NAMES)}"
+        )
+        return int(ExitCode.SCAN_ERROR)
+
     scanners = [cls() for cls in ALL_SCANNERS]
 
     runner = SubprocessCommandRunner()
@@ -238,14 +258,18 @@ def _dispatch_baseline(args: argparse.Namespace) -> int:
         _print_error(f"config error: {exc}")
         return int(ExitCode.SCAN_ERROR)
 
-    if args.baseline_command == "accept":
-        return _baseline_accept(args, scan_root.resolved, config)
-    if args.baseline_command == "list":
-        return _baseline_list(config)
-    if args.baseline_command == "prune":
-        return _baseline_prune(config)
-    _print_error(f"unknown baseline command: {args.baseline_command}")
-    return int(ExitCode.SCAN_ERROR)
+    try:
+        if args.baseline_command == "accept":
+            return _baseline_accept(args, scan_root.resolved, config)
+        if args.baseline_command == "list":
+            return _baseline_list(config)
+        if args.baseline_command == "prune":
+            return _baseline_prune(config)
+        _print_error(f"unknown baseline command: {args.baseline_command}")
+        return int(ExitCode.SCAN_ERROR)
+    except BaselineError as exc:
+        _print_error(f"baseline error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
 
 
 def _baseline_accept(

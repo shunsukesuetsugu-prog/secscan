@@ -226,6 +226,11 @@ def apply_baseline(
 ) -> BaselineApplication:
     """Split findings into kept vs. suppressed, with audit warnings.
 
+    A baseline entry matches a finding only when ALL of fingerprint, scanner,
+    and rule_id match. Codex 3rd review flagged fingerprint-only matching as
+    a cross-scanner suppression risk (a hash collision across scanners would
+    silently silence both).
+
     Expired entries do NOT suppress; an "expired baseline entry" warning is
     emitted instead, so reviewers know the suppression has lapsed. This is
     deliberate — we want loud lapses rather than silent re-detection.
@@ -234,13 +239,18 @@ def apply_baseline(
         return BaselineApplication(kept=findings, suppressed=(), warnings=())
 
     moment = now or datetime.now(UTC)
-    by_fp = baseline.by_fingerprint()
+    # Index by the full (fingerprint, scanner, rule_id) tuple — never on
+    # fingerprint alone.
+    by_key: dict[tuple[str, str, str], BaselineEntry] = {
+        (e.fingerprint, e.scanner, e.rule_id): e for e in baseline.entries
+    }
     kept: list[Finding] = []
     suppressed: list[Finding] = []
     expired_seen: set[str] = set()
 
     for finding in findings:
-        entry = by_fp.get(finding.fingerprint)
+        key = (finding.fingerprint, finding.scanner, finding.rule_id)
+        entry = by_key.get(key)
         if entry is None:
             kept.append(finding)
             continue
@@ -251,8 +261,12 @@ def apply_baseline(
         suppressed.append(finding)
 
     warnings: list[str] = []
+    # Build a fingerprint→entry index just for the warning lookup. Multiple
+    # baseline entries could share a fingerprint across (scanner, rule_id);
+    # we surface one warning per fingerprint to keep noise bounded.
+    by_fp_for_warnings: dict[str, BaselineEntry] = {e.fingerprint: e for e in baseline.entries}
     for fp in expired_seen:
-        entry = by_fp[fp]
+        entry = by_fp_for_warnings[fp]
         warnings.append(
             f"baseline entry expired and no longer suppressing: "
             f"{entry.scanner}:{entry.rule_id} ({entry.fingerprint[:12]}...)"
@@ -401,9 +415,15 @@ def _parse_dt(value: object, name: str) -> datetime:
         raise BaselineError(f"{name}: expected ISO 8601 string")
     try:
         # ``datetime.fromisoformat`` handles "Z" suffix from Python 3.11+.
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise BaselineError(f"{name}: invalid datetime {value!r} ({exc})") from exc
+    # Treat naive datetimes as UTC. Comparing naive against tz-aware later
+    # (in ``is_expired``) would raise ``TypeError``, which Codex 3rd review
+    # flagged as a baseline-parse crash path.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _format_dt(value: datetime) -> str:

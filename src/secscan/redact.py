@@ -2,19 +2,23 @@
 
 secscan must never persist or display raw secrets. Even when an upstream tool
 (gitleaks) reports a ``Secret`` field verbatim, we replace it before anything
-else inspects, hashes, logs, or stores it. This module provides:
+else inspects, logs, or stores it. This module provides:
 
-- ``redact_secret(value)``    : replace a single secret with a token that
-                                preserves length category but no content.
-- ``hash_secret(value)``      : SHA-256 of the original bytes, used ONCE for
-                                fingerprint construction; the caller must
-                                discard the original immediately afterwards.
-- ``redact_text(text, secrets)``: redact a multi-line blob given known secrets.
+- ``redact_secret(value)``    : replace a single secret with a fixed token.
+- ``redact_text(text, secrets)``: redact a multi-line blob given known secrets
+                                  plus well-known credential-shape patterns.
+- ``truncate(text, limit)``   : bound stderr excerpts before display.
 
 We deliberately do NOT try to "detect" secrets in arbitrary text — that's
 gitleaks' job. This module only redacts values we have already been told are
 secrets, plus a small set of well-known credential patterns when masking
 stderr/message fields where a scanner might have leaked one.
+
+We deliberately do NOT provide a ``hash_secret`` helper. Hashing a secret
+creates a useful oracle for offline brute-force attacks against weak/short
+secrets (api keys, sessions), so the only safe path is "never let the secret
+into secscan in the first place" — the gitleaks adapter enforces this via
+``--redact=100``.
 
 Defense in depth: we also apply ``redact_text`` to scanner stderr excerpts
 before they reach the reporter or logs.
@@ -22,7 +26,6 @@ before they reach the reporter or logs.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Iterable
 
@@ -55,17 +58,6 @@ _CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         REDACTED,
     ),
 )
-
-
-def hash_secret(value: str) -> str:
-    """One-shot SHA-256 of a secret value, returned as hex.
-
-    Callers MUST discard ``value`` immediately after this call. This function
-    exists specifically so the only code path that touches a raw secret is
-    this tiny, auditable surface — fingerprints flow downstream, the secret
-    does not.
-    """
-    return hashlib.sha256(value.encode("utf-8", errors="surrogateescape")).hexdigest()
 
 
 def redact_secret(value: str) -> str:

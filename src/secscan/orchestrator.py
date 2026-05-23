@@ -19,6 +19,7 @@ operator sees every issue at once.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 from .baseline import (
@@ -37,6 +38,7 @@ from .models import (
 )
 from .path_safety import ResolvedRoot
 from .policy import PolicyDecision, apply_overrides, evaluate
+from .redact import redact_text, truncate
 from .runner import CommandRunner
 from .scanners.base import Scanner, ToolNotFoundError
 
@@ -101,15 +103,25 @@ def run_scanners(
             except Exception as exc:
                 # We intentionally catch broad exceptions: a single mis-
                 # behaving scanner must not kill the whole run.
+                # ``str(exc)`` may include scanned-file content / env values,
+                # so redact before storing.
+                safe_reason = redact_text(
+                    truncate(f"scanner crashed: {type(exc).__name__}: {exc}", limit=300)
+                )
                 errors.append(
                     ScannerError(
                         scanner=scanner.name,
-                        reason=f"scanner crashed: {type(exc).__name__}: {exc}",
+                        reason=safe_reason,
                         stderr_excerpt=None,
                         returncode=None,
                     )
                 )
                 continue
+
+            # Verify all reported file paths are inside the scan root.
+            # External tools can be tricked or buggy; we don't display paths
+            # we can't vouch for.
+            outcome = _sanitize_outcome_paths(outcome, scan_root)
 
             _accumulate(outcome, findings=findings, errors=errors, tool_versions=tool_versions)
 
@@ -207,3 +219,34 @@ def _load_baseline_safely(path: Path) -> Baseline | None:
     error with exit code SCAN_ERROR.
     """
     return load_baseline(path)
+
+
+def _sanitize_outcome_paths(
+    outcome: ScanOutcome, scan_root: ResolvedRoot
+) -> ScanOutcome:
+    """Drop scanner Findings that reference files outside the scan root.
+
+    External tools can be coaxed (via symlinks, mis-configured includes, or
+    bugs) to report locations outside ``--path``. Showing those paths is
+    a leak of host filesystem layout and undermines the scan-root contract.
+    We mutate Finding.location.file to None for any unverified path; we do
+    not drop the Finding entirely (a finding without a path is still a
+    real finding worth reporting), but we DO strip the path so the user
+    can't be misled.
+    """
+    if outcome.error is not None or not outcome.findings:
+        return outcome
+    cleaned: list[Finding] = []
+    for finding in outcome.findings:
+        cleaned.append(_sanitize_finding_path(finding, scan_root))
+    return dc_replace(outcome, findings=tuple(cleaned))
+
+
+def _sanitize_finding_path(finding: Finding, scan_root: ResolvedRoot) -> Finding:
+    if finding.location is None or finding.location.file is None:
+        return finding
+    candidate = scan_root.resolved / finding.location.file
+    if not scan_root.contains(candidate) or scan_root.is_ignored(candidate):
+        new_location = dc_replace(finding.location, file=None, line=None, column=None)
+        return dc_replace(finding, location=new_location)
+    return finding

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from secscan.redact import (
     REDACTED,
-    hash_secret,
     redact_secret,
     redact_text,
     truncate,
@@ -32,28 +31,16 @@ def test_redact_secret_returns_no_portion_of_original() -> None:
     assert out[-4:] != secret[-4:]
 
 
-# --- hash_secret -----------------------------------------------------------
+# --- hash_secret is intentionally removed ----------------------------------
 
 
-def test_hash_secret_is_stable_sha256() -> None:
-    # SHA-256("foo") = "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
-    expected = "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
-    assert hash_secret("foo") == expected
+def test_hash_secret_helper_is_not_exposed() -> None:
+    # Hashing secrets creates a brute-force oracle; we deliberately removed
+    # the helper. This test pins that absence so a future refactor can't
+    # quietly reintroduce it.
+    import secscan.redact as redact_module
 
-
-def test_hash_secret_handles_unicode() -> None:
-    # Should not raise on non-ASCII.
-    h1 = hash_secret("日本語パスワード")
-    h2 = hash_secret("日本語パスワード")
-    assert h1 == h2
-    assert len(h1) == 64
-
-
-def test_hash_secret_handles_surrogateescape() -> None:
-    # Bytes that don't decode cleanly are still hashable via surrogateescape.
-    bad = b"\xff\xfe\xfd".decode("utf-8", errors="surrogateescape")
-    out = hash_secret(bad)
-    assert len(out) == 64
+    assert not hasattr(redact_module, "hash_secret")
 
 
 # --- redact_text -----------------------------------------------------------

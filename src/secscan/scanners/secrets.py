@@ -1,20 +1,22 @@
 """Secret detection via gitleaks.
 
-Critical invariant: secscan never holds the raw secret value. We invoke
-gitleaks with ``--redact=100`` so the ``Secret`` and ``Match`` fields in the
-JSON output are already replaced with ``REDACTED``. We additionally pass
-``--exit-code=101`` to make the "leak detected" path distinguishable from
-"tool error" — gitleaks v8's default exit code for both is 1 (Codex 2nd
-review explicitly required this).
+Critical invariants enforced by this module:
+
+- secscan never holds the raw secret value. We invoke gitleaks with
+  ``--redact=100`` so ``Secret`` and ``Match`` are placeholders before we
+  ever read them.
+- "Leak detected" must be distinguishable from "tool error" — gitleaks v8's
+  default exit code for both is 1, so we use ``--exit-code=101`` to make
+  leaks land on 101.
+- ``101 with empty / malformed stdout`` is an error, not a false-clean.
+- All Description / message text is run through ``redact_text`` before it
+  becomes ``Finding.title`` or ``Finding.message`` — both render to the user.
 
 Fingerprint construction uses, in order of preference:
 1. gitleaks' own ``Fingerprint`` field (preserved as ``raw_fingerprint``).
 2. A composite of ``RuleID + relative file + start_line + start_column``.
 
-We deliberately do NOT hash the secret value as part of the fingerprint:
-even with --redact, accidentally hashing user-supplied content would create
-a side channel. The composite key is stable enough for baseline matching
-and doesn't depend on the secret content at all.
+The fingerprint never incorporates the secret value or its hash.
 
 Tested with gitleaks v8.x.
 """
@@ -24,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import (
@@ -102,11 +105,22 @@ class SecretsScanner(Scanner):
             )
 
         if result.returncode == _GITLEAKS_LEAK_EXIT_CODE:
-            # Expected "leaks present" exit. stdout MUST be parseable JSON.
-            findings = _parse_findings(result.stdout, unit.root)
+            # Expected "leaks present" exit. stdout MUST be a non-empty JSON
+            # array. Codex 3rd review: "101 + empty stdout" must NOT be
+            # silently treated as zero findings — that's a false-clean.
+            parsed = _parse_findings(result.stdout, unit.root)
+            if isinstance(parsed, _ParseError):
+                return _error(
+                    self.name,
+                    parsed.reason,
+                    stderr=result.stderr,
+                    returncode=result.returncode,
+                    tool_version=tool_version,
+                    duration=result.duration_seconds,
+                )
             return ScanOutcome(
                 scanner=self.name,
-                findings=findings,
+                findings=parsed,
                 tool_version=tool_version,
                 duration_seconds=result.duration_seconds,
             )
@@ -134,28 +148,48 @@ def _detect_gitleaks_version(runner: CommandRunner, cwd: Path) -> str | None:
     return version or None
 
 
-def _parse_findings(stdout: bytes, scan_root: Path) -> tuple[Finding, ...]:
+@dataclass(frozen=True)
+class _ParseError:
+    """Sentinel returned by ``_parse_findings`` for empty/malformed stdout.
+
+    Carrying the reason inline keeps the scanner branching tight and the
+    error message specific. We use a dataclass instead of bare object()
+    sentinels so the type narrowing is visible to mypy.
+    """
+
+    reason: str
+
+
+def _parse_findings(
+    stdout: bytes, scan_root: Path
+) -> tuple[Finding, ...] | _ParseError:
     """Parse gitleaks JSON output into normalized Findings.
 
-    gitleaks emits a JSON array of objects. Each object includes RuleID,
-    Description, StartLine/EndLine/StartColumn/EndColumn, Match, Secret,
-    File, Fingerprint, etc. (See: gitleaks v8 schema.)
+    Returns either:
+    - A tuple of Findings when stdout is a JSON array.
+    - A ``_ParseError`` when stdout is empty or not a JSON array. The caller
+      translates these into ScannerError outcomes.
+
+    gitleaks v8 emits a JSON array even when zero findings — see the v8
+    README. ``exit 101`` is only emitted when at least one leak is found,
+    so an empty stdout in that situation is anomalous.
     """
     text = decode_output(stdout).strip()
     if not text:
-        return ()
+        return _ParseError(
+            reason="gitleaks reported leaks (exit 101) but stdout was empty"
+        )
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        # Malformed JSON despite leak-exit-code: treat as zero findings but
-        # the orchestrator will see the original ScannerError if we raise.
-        # Since gitleaks already signaled "leak", we prefer a more honest
-        # outcome: return a synthetic Finding describing the parse failure
-        # so the user notices something went wrong.
-        return (_synthetic_parse_error_finding(text),)
+        return _ParseError(
+            reason="gitleaks reported leaks (exit 101) but stdout was not a JSON array"
+        )
 
     if not isinstance(data, list):
-        return (_synthetic_parse_error_finding(text),)
+        return _ParseError(
+            reason="gitleaks reported leaks (exit 101) but stdout was not a JSON array"
+        )
 
     findings: list[Finding] = []
     for item in data:
@@ -180,7 +214,8 @@ def _finding_from_gitleaks(item: dict[str, object], scan_root: Path) -> Finding:
     rel_file = _normalize_path(file_path_raw, scan_root)
 
     # Ensure no actual secret is in the dict: even with --redact, defense
-    # in depth — sweep all string values through redact_text.
+    # in depth — sweep all string values through redact_text. Both ``title``
+    # and ``message`` flow into the rendered report, so BOTH must be safe.
     safe_message = redact_text(description)
 
     # Composite fingerprint: do NOT hash any secret-derived value.
@@ -190,7 +225,7 @@ def _finding_from_gitleaks(item: dict[str, object], scan_root: Path) -> Finding:
         scanner="secrets",
         rule_id=rule_id,
         severity=Severity.HIGH,  # gitleaks doesn't grade by severity; default HIGH.
-        title=description,
+        title=safe_message,
         message=safe_message,
         location=Location(
             file=rel_file,
@@ -202,22 +237,6 @@ def _finding_from_gitleaks(item: dict[str, object], scan_root: Path) -> Finding:
         fingerprint=composite,
         raw_fingerprint=raw_fingerprint,
         raw=_safe_raw(item),
-    )
-
-
-def _synthetic_parse_error_finding(text: str) -> Finding:
-    excerpt = redact_text(truncate(text, limit=200))
-    return Finding(
-        scanner="secrets",
-        rule_id="secscan.parse-error",
-        severity=Severity.HIGH,
-        title="gitleaks output parse error",
-        message=(
-            "gitleaks reported leaks but output was not valid JSON. "
-            f"Excerpt (redacted): {excerpt}"
-        ),
-        location=None,
-        fingerprint="secscan-parse-error",
     )
 
 
@@ -242,21 +261,39 @@ def _normalize_path(raw: str, scan_root: Path) -> str | None:
         return p.as_posix()
 
 
-def _safe_raw(item: dict[str, object]) -> dict[str, object]:
-    """Strip any field that might leak the secret value.
+_RAW_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "RuleID",
+        "Description",
+        "StartLine",
+        "EndLine",
+        "StartColumn",
+        "EndColumn",
+        "File",
+        "SymlinkFile",
+        "Fingerprint",
+        "Tags",
+        "Entropy",
+        # Secret/Match intentionally NOT here — see force-redact below.
+    }
+)
 
-    With --redact=100 these fields already contain a placeholder, but we
-    over-rotate to be sure: any value matching a known sentinel is left as
-    is, others are conservatively redacted.
+
+def _safe_raw(item: dict[str, object]) -> dict[str, object]:
+    """Return a copy of the gitleaks item safe to retain/display.
+
+    Whitelist approach (Codex 3rd review): unknown fields are dropped rather
+    than redacted. ``Secret``/``Match`` are always replaced with
+    ``REDACTED``, even when gitleaks claims to have already redacted them —
+    we never trust the upstream tool's redaction unconditionally.
+    Author/Email/Date/Commit/Message fields are intentionally excluded
+    because they can carry user-supplied content that may include secrets.
     """
-    out: dict[str, object] = {}
+    out: dict[str, object] = {"Secret": REDACTED, "Match": REDACTED}
     for key, value in item.items():
-        if key in {"Secret", "Match"}:
-            if isinstance(value, str) and value in _REDACTED_SENTINELS:
-                out[key] = value
-            else:
-                out[key] = REDACTED
-        elif isinstance(value, str):
+        if key not in _RAW_ALLOWED_KEYS:
+            continue
+        if isinstance(value, str):
             out[key] = redact_text(value)
         else:
             out[key] = value

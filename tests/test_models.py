@@ -127,8 +127,12 @@ def test_work_unit_defaults() -> None:
 
 def test_scan_config_extra_defaults_to_empty_mapping() -> None:
     cfg = ScanConfig()
-    assert cfg.extra == {}
-    # Independent instances do not share the dict.
-    cfg2 = ScanConfig()
-    cfg.extra["x"] = "y"
-    assert "x" not in cfg2.extra
+    assert dict(cfg.extra) == {}
+
+
+def test_scan_config_extra_default_is_immutable() -> None:
+    # Codex 3rd review: ``extra`` claimed to be a read-only mapping must
+    # actually reject mutation, otherwise the immutability promise leaks.
+    cfg = ScanConfig()
+    with pytest.raises(TypeError):
+        cfg.extra["x"] = "y"  # type: ignore[index]
