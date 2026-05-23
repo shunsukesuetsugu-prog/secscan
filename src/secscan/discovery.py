@@ -88,6 +88,12 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
         )
 
     nested = _detect_nested_manifests(root)
+    # Codex 24th review: a workspace member's manifest IS being scanned
+    # via the corresponding WorkUnit; the "nested not scanned" warning
+    # would be misleading. Drop manifests that any unit already covers.
+    if nested:
+        covered = _covered_manifest_paths(units, root)
+        nested = nested - covered
     if nested:
         # Truncate to keep warnings actionable.
         sample = ", ".join(sorted(nested)[:5])
@@ -97,6 +103,24 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
         )
 
     return Discovery(work_units=tuple(units), warnings=tuple(warnings))
+
+
+def _covered_manifest_paths(
+    units: list[WorkUnit], root: ResolvedRoot
+) -> set[str]:
+    """Return the set of nested-manifest display strings already covered
+    by an emitted WorkUnit. Used to suppress the "nested but not scanned"
+    warning for workspace members we DID scan."""
+    covered: set[str] = set()
+    for unit in units:
+        if unit.manifest is None:
+            continue
+        try:
+            rel = unit.manifest.resolve(strict=False).relative_to(root.resolved)
+        except (ValueError, OSError):
+            continue
+        covered.add(rel.as_posix())
+    return covered
 
 
 def _check_workspaces(

@@ -361,6 +361,24 @@ def test_uv_workspace_rejects_invalid_member_name(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("bad_name", ["foo-", "foo.", "foo_", "1foo!", "@foo"])
+def test_uv_workspace_rejects_trailing_separator_or_invalid_chars(
+    tmp_path: Path, bad_name: str
+) -> None:
+    """Codex 24th review: trailing separators (``foo-`` / ``foo.``) are
+    not valid PEP 508 names — uv/pip reject them and we should too."""
+    _write_uv_pyproject(tmp_path, members=["packages/*"])
+    _write_uv_member(tmp_path, "packages/bad", bad_name)
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    workspace_ids = {u.workspace_id for u in expansion.units}
+    assert bad_name not in workspace_ids
+    # And a canonicalized form of the bad name also shouldn't be emitted.
+    assert not any(bad_name.lower().startswith(wid) for wid in workspace_ids if wid)
+
+
 def test_uv_workspace_includes_root_as_member(tmp_path: Path) -> None:
     """uv workspaces always include the root project as a member."""
     _write_uv_pyproject(tmp_path, name="root-app", members=[])

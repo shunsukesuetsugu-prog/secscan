@@ -234,6 +234,28 @@ def test_pnpm_workspace_empty_falls_back_to_root_scan(tmp_path: Path) -> None:
     assert npm_units[0].workspace_id is None
 
 
+def test_workspace_members_excluded_from_nested_manifest_warning(
+    tmp_path: Path,
+) -> None:
+    """Codex 24th review: workspace members ARE being scanned via their
+    own WorkUnits; reporting their manifests as 'nested but not scanned'
+    is misleading. The warning must drop manifests covered by a unit."""
+    (tmp_path / "package.json").write_text(
+        '{"name": "root", "private": true, "workspaces": ["packages/*"]}'
+    )
+    (tmp_path / "package-lock.json").write_text("{}")
+    api = tmp_path / "packages" / "api"
+    api.mkdir(parents=True)
+    (api / "package.json").write_text('{"name": "@org/api"}')
+    root = resolve_scan_root(tmp_path)
+    discovery = discover_for_scanner("deps", root)
+    # No "nested package manifests" warning for packages/api/package.json
+    # — it's already covered by an emitted unit.
+    assert all(
+        "nested package manifests" not in w for w in discovery.warnings
+    )
+
+
 def test_yarn_unsupported_blocks_npm_workspace_processing(
     tmp_path: Path,
 ) -> None:
