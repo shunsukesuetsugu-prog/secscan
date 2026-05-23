@@ -179,11 +179,19 @@ def detect_npm_workspace(root: ResolvedRoot) -> WorkspaceExpansion | None:
 def detect_uv_workspace(root: ResolvedRoot) -> WorkspaceExpansion | None:
     """Detect uv workspaces by ``[tool.uv.workspace]`` in pyproject.toml.
 
-    Phase 2-B status: pip-audit cannot consume ``uv.lock`` directly, so
-    secscan does NOT split a uv workspace into per-member WorkUnits yet.
-    We still detect the configuration so the Discovery layer can emit a
-    clear warning and fall back to scanning the root as a single unit.
-    Phase 2-C will fix the export path.
+    Phase 2-C-1: full per-member support. We parse ``members`` (+ optional
+    ``exclude``) globs, look at each member's ``pyproject.toml`` for the
+    PEP 503 project name, and emit one WorkUnit per member. The
+    ``DepsScanner`` then drives ``uv export --package <name>`` for each
+    unit to produce a per-member requirements.txt that pip-audit can
+    consume (uv.lock is not directly readable by pip-audit).
+
+    Returns ``None`` when there is no uv workspace stanza, so the
+    discovery layer falls through to single-project pypi detection.
+    A *malformed* stanza returns a non-None WorkspaceExpansion whose
+    ``units`` is empty and ``warnings`` explains why — discovery uses
+    that to suppress the single-project fallback and avoid silently
+    scanning the root with the wrong assumptions.
     """
     pyproject = root.resolved / "pyproject.toml"
     if not _is_real_file(pyproject):
@@ -198,17 +206,169 @@ def detect_uv_workspace(root: ResolvedRoot) -> WorkspaceExpansion | None:
     workspace = uv.get("workspace")
     if not isinstance(workspace, dict):
         return None
-    # Workspace stanza exists. Phase 2-B doesn't split members here yet.
+
+    # uv requires the root lockfile to be present for any reproducible
+    # export. Without one, ``uv export --locked`` (which we run later)
+    # will fail; surface that early instead of crashing per-member.
+    uv_lock = root.resolved / "uv.lock"
+    if not _is_real_file(uv_lock):
+        return WorkspaceExpansion(
+            provider="uv",
+            units=(),
+            warnings=(
+                "uv workspace detected but uv.lock is missing or a symlink; "
+                "run `uv lock` at the repo root to enable per-member audit.",
+            ),
+        )
+
+    raw_members = workspace.get("members")
+    if raw_members is None:
+        # Per uv docs, omitting ``members`` means the workspace is the
+        # root project only. We still emit a single WorkUnit for the
+        # root so the export-based audit pipeline kicks in.
+        raw_members = []
+    elif not isinstance(raw_members, list):
+        return WorkspaceExpansion(
+            provider="uv",
+            units=(),
+            warnings=(
+                "uv workspace 'members' must be a list of glob patterns.",
+            ),
+        )
+
+    raw_exclude = workspace.get("exclude", [])
+    if not isinstance(raw_exclude, list):
+        raw_exclude = []
+
+    includes, excl_inline, glob_warnings = _split_globs(raw_members, source="uv")
+    excludes_clean, _excl_dummy, exclude_warnings = _split_globs(
+        raw_exclude, source="uv-exclude"
+    )
+    # uv uses a separate ``exclude`` key (vs pnpm's ``!`` prefix); merge.
+    excludes = excl_inline + excludes_clean
+    member_dirs = _expand_globs(root, includes, excludes)
+
+    # uv root is always a workspace member; add it explicitly so that an
+    # ``--package <root-name>`` export covers root-level deps.
+    if root.resolved not in member_dirs:
+        member_dirs = [root.resolved, *member_dirs]
+
+    units, count_warnings = _build_uv_units(root, member_dirs, root_lock=uv_lock)
+    warnings = list(glob_warnings) + list(exclude_warnings) + list(count_warnings)
     return WorkspaceExpansion(
         provider="uv",
-        units=(),  # caller falls back to root scanning
-        warnings=(
-            "uv workspace detected; per-member scanning is not yet supported "
-            "(planned for a future release). Scanning the root project as a "
-            "single unit. To audit each member explicitly, run "
-            "`uv export -o requirements.txt --package <name>` per member.",
-        ),
+        units=units,
+        warnings=tuple(warnings),
     )
+
+
+# PEP 503 normalization: package distribution names are case-insensitive
+# and treat any run of ``-_.`` as equivalent to a single ``-``.
+_PEP503_SEPARATOR = re.compile(r"[-_.]+")
+# A valid PEP 508/503 distribution name is a letter/digit start, then
+# letters/digits/_/-/. characters. We are more permissive than strict
+# PEP 508 to accept names that uv itself accepts, but we DO refuse
+# anything that could be interpreted as a CLI flag (``-`` prefix) or
+# contain shell-grammar.
+_VALID_DIST_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _canonicalize_pep503(name: str) -> str:
+    return _PEP503_SEPARATOR.sub("-", name).lower()
+
+
+def _build_uv_units(
+    root: ResolvedRoot,
+    member_dirs: list[Path],
+    *,
+    root_lock: Path,
+) -> tuple[tuple[WorkUnit, ...], list[str]]:
+    """Build WorkUnits for a uv workspace expansion.
+
+    Each unit carries the (validated, canonicalized) ``[project].name``
+    of the member as its ``workspace_id``; the DepsScanner drives
+    ``uv export --package <name>`` against this id. Duplicate
+    canonicalized names are skipped with a warning so the same package
+    never produces conflated findings.
+    """
+    warnings: list[str] = []
+    truncated = False
+    if len(member_dirs) > _WORKSPACE_HARD_CAP:
+        warnings.append(
+            f"uv workspace has {len(member_dirs)} members; truncating to "
+            f"{_WORKSPACE_HARD_CAP}."
+        )
+        member_dirs = member_dirs[:_WORKSPACE_HARD_CAP]
+        truncated = True
+    elif len(member_dirs) > _WORKSPACE_WARN_THRESHOLD:
+        warnings.append(
+            f"uv workspace has {len(member_dirs)} members; secscan will "
+            f"export and audit each individually which may take a while."
+        )
+
+    units: list[WorkUnit] = []
+    seen_canonical: set[str] = set()
+    for member in member_dirs:
+        manifest = member / "pyproject.toml"
+        if not _is_real_file(manifest):
+            try:
+                rel = member.relative_to(root.resolved)
+                warnings.append(
+                    f"uv workspace member at '{rel.as_posix()}' has no "
+                    f"pyproject.toml; skipped."
+                )
+            except ValueError:
+                warnings.append("uv workspace member outside scan root; skipped.")
+            continue
+        data = _read_toml(manifest)
+        project = data.get("project") if isinstance(data, dict) else None
+        if not isinstance(project, dict):
+            continue
+        name = project.get("name")
+        if not isinstance(name, str) or not name.strip():
+            try:
+                rel = member.relative_to(root.resolved)
+                warnings.append(
+                    f"uv workspace member at '{rel.as_posix()}' has no "
+                    f"[project].name; skipped."
+                )
+            except ValueError:
+                warnings.append("uv workspace member outside scan root; skipped.")
+            continue
+        stripped = name.strip()
+        if not _VALID_DIST_NAME.match(stripped) or _UNSAFE_SELECTOR_CHARS.search(stripped):
+            warnings.append(
+                f"uv workspace member name '{stripped}' is not a valid PEP "
+                f"508/503 distribution name or contains unsafe characters; "
+                f"skipped."
+            )
+            continue
+        canonical = _canonicalize_pep503(stripped)
+        if canonical in seen_canonical:
+            warnings.append(
+                f"uv workspace has duplicate canonicalized name "
+                f"'{canonical}'; the second occurrence was skipped."
+            )
+            continue
+        seen_canonical.add(canonical)
+        try:
+            member_path = member.relative_to(root.resolved)
+        except ValueError:
+            continue
+        units.append(
+            WorkUnit(
+                root=root.resolved,
+                ecosystem="pypi",
+                manifest=manifest,
+                lockfile=root_lock,
+                package_manager="uv",
+                workspace_id=canonical,
+                workspace_member_path=member_path,
+            )
+        )
+    if not units and not truncated and not warnings:
+        warnings.append("uv workspace patterns matched no members.")
+    return tuple(units), warnings
 
 
 def detect_yarn_unsupported(root: ResolvedRoot) -> tuple[str, ...]:

@@ -15,8 +15,11 @@ The scanner enforces lockfile policy locally:
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import ClassVar
 
 from ..models import (
@@ -191,6 +194,15 @@ class DepsScanner(Scanner):
                 "`pip install 'secscan[deps]'`) and ensure it is on PATH",
             )
 
+        # Phase 2-C-1: when this is a uv workspace member, go through
+        # ``uv export --package <name>`` to produce a per-member
+        # requirements.txt and audit that. The legacy single-project
+        # paths still dispatch to ``_select_pip_audit_argv``.
+        if unit.package_manager == "uv" and unit.workspace_id is not None:
+            return self._run_uv_workspace_audit(
+                unit=unit, runner=runner, config=config
+            )
+
         argv = self._select_pip_audit_argv(unit)
         if isinstance(argv, ScanOutcome):
             return argv  # An error result returned for unsupported input.
@@ -215,6 +227,102 @@ class DepsScanner(Scanner):
             tool_version=None,
             duration_seconds=result.duration_seconds,
         )
+
+    def _run_uv_workspace_audit(
+        self,
+        *,
+        unit: WorkUnit,
+        runner: CommandRunner,
+        config: ScanConfig,
+    ) -> ScanOutcome:
+        """uv workspace member audit via ``uv export`` + ``pip-audit``.
+
+        Two subprocess calls:
+
+        1. ``uv export --locked --format requirements.txt --output-file
+           <tmp> --package <name> --no-hashes --no-emit-local``
+           - ``--locked`` refuses to re-lock; we must NOT mutate the
+             user's uv.lock during a scan (Codex 23rd review).
+           - ``--no-emit-local`` keeps first-party workspace packages
+             out of the requirements file, eliminating a class of
+             pip-audit false positives and local-path resolution.
+           - The output file lives in a 0700 temp dir created with
+             ``tempfile.mkdtemp`` so the requirements (which may
+             contain index URLs etc.) are not world-readable.
+
+        2. ``pip-audit --format json --strict --requirement <tmp>``
+           as the existing requirements path. Findings inherit the
+           ``workspace_id`` so they carry a distinct ``deps-ws:`` fingerprint.
+        """
+        if shutil.which("uv") is None:
+            raise ToolNotFoundError(
+                "uv",
+                "install uv (`pip install uv` or `brew install uv`) and "
+                "ensure it is on PATH",
+            )
+
+        # 0700 dir + 0600 file. Codex 23rd review: don't put the
+        # requirements file under the scan root — keep secrets in
+        # index URLs etc. from leaking into ignored-but-readable
+        # locations.
+        tmp_dir = Path(tempfile.mkdtemp(prefix="secscan-uv-"))
+        os.chmod(tmp_dir, 0o700)
+        tmp_file = tmp_dir / "requirements.txt"
+        try:
+            tmp_file.touch(mode=0o600, exist_ok=False)
+            export_argv = (
+                "uv",
+                "export",
+                "--locked",
+                "--format",
+                "requirements.txt",
+                "--output-file",
+                str(tmp_file),
+                "--package",
+                unit.workspace_id or "",
+                "--no-hashes",
+                "--no-emit-local",
+            )
+            export_result = runner.run(
+                export_argv,
+                cwd=unit.root,
+                timeout_seconds=config.timeout_seconds,
+            )
+            if export_result.timed_out or export_result.returncode != 0:
+                return _make_error(
+                    f"uv export failed for workspace member "
+                    f"'{unit.workspace_id}'"
+                    + (" (timed out)" if export_result.timed_out else ""),
+                    stderr=export_result.stderr,
+                    returncode=export_result.returncode,
+                    duration=export_result.duration_seconds,
+                )
+            audit_argv = pip_audit_argv_for_requirements(str(tmp_file))
+            result = runner.run(
+                audit_argv,
+                cwd=unit.root,
+                timeout_seconds=config.timeout_seconds,
+            )
+            ok, error_reason = classify_pip_audit_exit(result)
+            if not ok:
+                return _make_error(
+                    error_reason or "pip-audit failed",
+                    stderr=result.stderr,
+                    returncode=result.returncode,
+                    duration=result.duration_seconds,
+                )
+            findings = build_findings_from_pip_audit(
+                result.stdout, workspace_id=unit.workspace_id
+            )
+            return ScanOutcome(
+                scanner=self.name,
+                findings=findings,
+                tool_version=None,
+                duration_seconds=result.duration_seconds
+                + export_result.duration_seconds,
+            )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def _select_pip_audit_argv(
         self, unit: WorkUnit

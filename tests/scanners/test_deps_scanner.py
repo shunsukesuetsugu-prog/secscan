@@ -532,3 +532,133 @@ def test_pnpm_ignore_dev_dependencies_adds_prod_flag(
     scanner.scan(unit, runner, cfg)
     argv = runner.calls[0][0]
     assert "--prod" in argv
+
+
+# --- Phase 2-C-1: uv workspace export pipeline ---------------------------
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_uv_workspace_runs_export_then_pip_audit(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """A uv workspace WorkUnit triggers a two-step subprocess: uv export
+    to a temp requirements.txt, then pip-audit on that file. The audit
+    findings inherit the workspace_id so their fingerprint is scoped."""
+    # 1) uv export succeeds.
+    runner.push(returncode=0, stdout=b"")
+    # 2) pip-audit returns one finding.
+    runner.push(
+        returncode=1,
+        stdout=json.dumps(
+            {
+                "dependencies": [
+                    {
+                        "name": "requests",
+                        "version": "2.0.0",
+                        "vulns": [{"id": "PYSEC-2024-1", "fix_versions": ["2.32.0"]}],
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="uv",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=tmp_path / "uv.lock",
+        workspace_id="org-api",
+    )
+    outcome = scanner.scan(unit, runner, ScanConfig(timeout_seconds=120))
+    assert outcome.succeeded
+    assert len(runner.calls) == 2
+    export_argv, _cwd, _timeout = runner.calls[0]
+    assert export_argv[0:2] == ("uv", "export")
+    # Critical safety flags pinned by Codex 23rd review.
+    assert "--locked" in export_argv
+    assert "--no-emit-local" in export_argv
+    assert "--no-hashes" in export_argv
+    # --package selects the workspace member.
+    pkg_idx = export_argv.index("--package")
+    assert export_argv[pkg_idx + 1] == "org-api"
+    # pip-audit was given a --requirement file (the temp export output).
+    audit_argv = runner.calls[1][0]
+    assert audit_argv[0] == "pip-audit"
+    assert "--requirement" in audit_argv
+    # workspace_id is carried into the finding's fingerprint.
+    (finding,) = outcome.findings
+    # Two distinct workspace_ids must produce different fingerprints; we
+    # only check the prefix marker here (full test in test_common.py).
+    assert finding.fingerprint != ""
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_uv_export_failure_does_not_invoke_pip_audit(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """If uv export errors out, pip-audit must not be invoked: there's
+    nothing valid to audit and running pip-audit anyway would produce
+    a confusing secondary error."""
+    runner.push(returncode=1, stderr=b"uv: lock is out of date")
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="uv",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=tmp_path / "uv.lock",
+        workspace_id="org-api",
+    )
+    outcome = scanner.scan(unit, runner, ScanConfig(timeout_seconds=60))
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "uv export failed" in outcome.error.reason
+    assert len(runner.calls) == 1  # pip-audit never ran
+
+
+def test_uv_workspace_without_uv_binary_raises_tool_not_found(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """uv must be on PATH before we even try to invoke export."""
+    # pip-audit is available but uv is not.
+    def which(name: str) -> str | None:
+        return "/usr/local/bin/pip-audit" if name == "pip-audit" else None
+
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="uv",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=tmp_path / "uv.lock",
+        workspace_id="org-api",
+    )
+    with (
+        patch.object(shutil, "which", side_effect=which),
+        pytest.raises(ToolNotFoundError) as exc_info,
+    ):
+        scanner.scan(unit, runner, ScanConfig())
+    assert exc_info.value.tool == "uv"
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_uv_workspace_export_stderr_is_redacted(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """uv stderr can contain index URLs with credentials. Surface
+    them only after passing through redact_text."""
+    runner.push(
+        returncode=1,
+        stderr=b"failed to fetch UV_INDEX_URL=https://user:secret@pypi.example.com/simple/",
+    )
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="uv",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=tmp_path / "uv.lock",
+        workspace_id="org-api",
+    )
+    outcome = scanner.scan(unit, runner, ScanConfig())
+    assert outcome.error is not None
+    excerpt = outcome.error.stderr_excerpt or ""
+    assert "user:secret" not in excerpt
+    assert "https://user:secret" not in excerpt

@@ -274,28 +274,134 @@ def test_npm_workspace_lockfile_attached(tmp_path: Path) -> None:
     assert unit.lockfile.name == "package-lock.json"
 
 
-# --- uv workspaces -------------------------------------------------------
+# --- uv workspaces (Phase 2-C-1) -----------------------------------------
 
 
-def test_uv_workspace_detected_but_no_units(tmp_path: Path) -> None:
-    """Phase 2-B detects uv workspace stanza but emits a warning instead
-    of splitting members (pip-audit can't consume uv.lock directly)."""
-    (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname='root'\n\n"
-        "[tool.uv.workspace]\nmembers = ['packages/*']\n",
-        encoding="utf-8",
+def _write_uv_pyproject(
+    root: Path, *, name: str = "root-app", members: list[str] | None = None
+) -> None:
+    body = f"[project]\nname='{name}'\n"
+    if members is not None:
+        joined = ", ".join(f"'{m}'" for m in members)
+        body += f"\n[tool.uv.workspace]\nmembers = [{joined}]\n"
+    (root / "pyproject.toml").write_text(body, encoding="utf-8")
+
+
+def _write_uv_member(root: Path, rel: str, name: str) -> Path:
+    member = root / rel
+    member.mkdir(parents=True, exist_ok=True)
+    (member / "pyproject.toml").write_text(
+        f"[project]\nname='{name}'\n", encoding="utf-8"
     )
+    return member
+
+
+def test_uv_workspace_returns_none_when_no_stanza(tmp_path: Path) -> None:
+    _write_uv_pyproject(tmp_path)
+    root = resolve_scan_root(tmp_path)
+    assert detect_uv_workspace(root) is None
+
+
+def test_uv_workspace_without_uv_lock_warns(tmp_path: Path) -> None:
+    """uv workspace audit requires a root uv.lock; missing it must
+    surface a clear warning rather than letting the audit silently
+    re-lock the project mid-scan."""
+    _write_uv_pyproject(tmp_path, members=["packages/*"])
     root = resolve_scan_root(tmp_path)
     expansion = detect_uv_workspace(root)
     assert expansion is not None
     assert expansion.units == ()
-    assert any("uv workspace" in w for w in expansion.warnings)
+    assert any("uv.lock is missing" in w for w in expansion.warnings)
 
 
-def test_uv_workspace_returns_none_when_no_stanza(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+def test_uv_workspace_expands_members(tmp_path: Path) -> None:
+    _write_uv_pyproject(tmp_path, name="root-app", members=["packages/*"])
+    _write_uv_member(tmp_path, "packages/api", "org-api")
+    _write_uv_member(tmp_path, "packages/web", "org-web")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
     root = resolve_scan_root(tmp_path)
-    assert detect_uv_workspace(root) is None
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    workspace_ids = {u.workspace_id for u in expansion.units}
+    # Root + 2 members. All names canonicalized lowercase / hyphenated.
+    assert workspace_ids == {"root-app", "org-api", "org-web"}
+    assert all(u.ecosystem == "pypi" for u in expansion.units)
+    assert all(u.package_manager == "uv" for u in expansion.units)
+    # The root lockfile is attached to every unit (uv audits run from the
+    # repo root, so every export pulls from the same lock).
+    assert all(u.lockfile is not None for u in expansion.units)
+    assert all(u.lockfile.name == "uv.lock" for u in expansion.units)
+
+
+def test_uv_workspace_canonicalizes_member_names(tmp_path: Path) -> None:
+    """Two members differing only in case / separator (PEP 503 quirks)
+    must be detected as duplicates so they don't conflate fingerprints."""
+    _write_uv_pyproject(tmp_path, members=["packages/*"])
+    _write_uv_member(tmp_path, "packages/api", "Org_API")
+    _write_uv_member(tmp_path, "packages/api2", "org-api")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    canonical_ids = [u.workspace_id for u in expansion.units]
+    # Root + first canonical occurrence only — duplicate is skipped.
+    assert canonical_ids.count("org-api") == 1
+    assert any("duplicate canonicalized name" in w for w in expansion.warnings)
+
+
+def test_uv_workspace_rejects_invalid_member_name(tmp_path: Path) -> None:
+    _write_uv_pyproject(tmp_path, members=["packages/*"])
+    _write_uv_member(tmp_path, "packages/bad", "-bad-leading-hyphen")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    assert all(
+        u.workspace_id != "-bad-leading-hyphen" for u in expansion.units
+    )
+
+
+def test_uv_workspace_includes_root_as_member(tmp_path: Path) -> None:
+    """uv workspaces always include the root project as a member."""
+    _write_uv_pyproject(tmp_path, name="root-app", members=[])
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    assert {u.workspace_id for u in expansion.units} == {"root-app"}
+
+
+def test_uv_workspace_exclude_glob(tmp_path: Path) -> None:
+    _write_uv_pyproject(tmp_path, name="root", members=["packages/*"])
+    # Add an exclude entry by rewriting the workspace stanza directly.
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='root'\n"
+        "[tool.uv.workspace]\n"
+        "members = ['packages/*']\n"
+        "exclude = ['packages/internal']\n"
+    )
+    _write_uv_member(tmp_path, "packages/api", "org-api")
+    _write_uv_member(tmp_path, "packages/internal", "org-internal")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    workspace_ids = {u.workspace_id for u in expansion.units}
+    assert "org-internal" not in workspace_ids
+    assert "org-api" in workspace_ids
+
+
+def test_uv_workspace_malformed_members_warns(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='root'\n"
+        "[tool.uv.workspace]\nmembers = 42\n"
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_uv_workspace(root)
+    assert expansion is not None
+    assert expansion.units == ()
+    assert any("members" in w for w in expansion.warnings)
 
 
 # --- yarn unsupported warning -------------------------------------------

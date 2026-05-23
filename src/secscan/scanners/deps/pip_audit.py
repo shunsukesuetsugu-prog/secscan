@@ -106,7 +106,16 @@ def classify_pip_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     return True, None
 
 
-def build_findings_from_pip_audit(stdout: bytes) -> tuple[Finding, ...]:
+def build_findings_from_pip_audit(
+    stdout: bytes, *, workspace_id: str | None = None
+) -> tuple[Finding, ...]:
+    """Parse pip-audit JSON into normalized Findings.
+
+    ``workspace_id`` (Phase 2-C-1) scopes the finding's fingerprint to a
+    uv workspace member when present, mirroring the npm/pnpm convention.
+    Root-only pip-audit scans pass ``workspace_id=None`` and keep the
+    legacy fingerprint format.
+    """
     text = decode_output(stdout)
     if not text.strip():
         return ()
@@ -147,6 +156,7 @@ def build_findings_from_pip_audit(stdout: bytes) -> tuple[Finding, ...]:
                 ecosystem="pypi",
                 package=name,
                 advisory_id=hints.advisory_id,
+                workspace_id=workspace_id,
             )
             if fingerprint in seen:
                 continue

@@ -51,8 +51,11 @@ _CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"), REDACTED),
     # PyPI tokens
     (re.compile(r"\bpypi-[A-Za-z0-9_\-]{30,}\b"), REDACTED),
-    # .npmrc / pip.conf style "key=token" lines: preserve the key, redact value.
-    # We only target known-name keys to avoid stripping benign config.
+    # .npmrc / pip.conf / uv config style "key=token" lines: preserve the
+    # key, redact value. We only target known-name keys to avoid stripping
+    # benign config. uv-specific env names added in Phase 2-C-1
+    # (Codex 23rd review): an authenticated uv index URL or token in an
+    # error message must not leak.
     (
         re.compile(
             r"(?i)(_authToken\s*=\s*|"
@@ -60,7 +63,11 @@ _CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
             r"_auth\s*=\s*|"
             r"NPM_TOKEN\s*=\s*|"
             r"PIP_INDEX_URL\s*=\s*|"
-            r"index-url\s*=\s*)"
+            r"index-url\s*=\s*|"
+            r"UV_INDEX\s*=\s*|"
+            r"UV_INDEX_URL\s*=\s*|"
+            r"UV_DEFAULT_INDEX\s*=\s*|"
+            r"UV_EXTRA_INDEX_URL\s*=\s*)"
             r"\S+"
         ),
         r"\1" + REDACTED,

@@ -56,7 +56,12 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
     # single-project discovery path. ``_check_workspaces`` returns the
     # workspace units (possibly empty if the workspace expansion produced
     # nothing) AND any associated warnings.
-    workspace_units, workspace_warnings, workspace_npm_handled = _check_workspaces(root)
+    (
+        workspace_units,
+        workspace_warnings,
+        workspace_npm_handled,
+        workspace_uv_handled,
+    ) = _check_workspaces(root)
     units.extend(workspace_units)
     warnings.extend(workspace_warnings)
 
@@ -68,9 +73,13 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
         if npm is not None:
             units.append(npm)
 
-    pypi = _detect_pypi(root.resolved)
-    if pypi is not None:
-        units.append(pypi)
+    # Same logic for pypi: uv workspace expansion (Phase 2-C-1) already
+    # emits one WorkUnit per member; without this guard we'd add a
+    # redundant single-project pypi unit and pip-audit twice.
+    if not workspace_uv_handled:
+        pypi = _detect_pypi(root.resolved)
+        if pypi is not None:
+            units.append(pypi)
 
     if not units:
         warnings.append(
@@ -92,22 +101,25 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
 
 def _check_workspaces(
     root: ResolvedRoot,
-) -> tuple[list[WorkUnit], list[str], bool]:
+) -> tuple[list[WorkUnit], list[str], bool, bool]:
     """Inspect the scan root for workspace configurations.
 
-    Returns ``(units, warnings, npm_handled)`` where:
+    Returns ``(units, warnings, npm_handled, uv_handled)`` where:
 
-    - ``units``: WorkUnits produced by workspace expansion (may be empty
-      even when a workspace config is present, e.g. uv where Phase 2-B
-      doesn't split members yet).
+    - ``units``: WorkUnits produced by workspace expansion.
     - ``warnings``: messages to surface in the report.
-    - ``npm_handled``: True when an npm-family workspace expansion ran
-      (and so single-project npm detection should be skipped to avoid
-      double-counting). False otherwise — including when a yarn workspace
-      was detected with no compatible lockfile.
+    - ``npm_handled``: True when an npm-family workspace expansion
+      produced at least one unit; single-project npm fallback should be
+      skipped in that case.
+    - ``uv_handled``: same idea for uv workspace expansion (Phase 2-C-1).
+      A non-empty uv workspace suppresses the single-project pypi
+      fallback to avoid auditing the root twice. A *malformed* uv
+      workspace stanza (returned as ``units=()`` with warnings) also
+      suppresses the fallback so we don't silently audit with the wrong
+      assumptions.
 
-    Workspace detection only consults ``workspaces`` (Phase 2-B's narrow
-    responsibility); the heavy lifting lives there.
+    Workspace detection consults the workspace config files only — the
+    heavy lifting lives in ``workspaces.py``.
     """
     # Avoid a circular import by deferring it to call time.
     from .workspaces import (
@@ -159,15 +171,19 @@ def _check_workspaces(
             if npm_ws.units:
                 npm_handled = True
 
+    uv_handled = False
     uv = detect_uv_workspace(root)
     if uv is not None:
         units.extend(uv.units)
         warnings.extend(uv.warnings)
-        # uv detection does NOT yet produce per-member units; we leave
-        # single-project pypi detection enabled so the root project is
-        # still scanned.
+        # Phase 2-C-1: when uv detection returns ANY response (units OR
+        # warnings) we suppress the single-project pypi fallback. A
+        # malformed/missing-lock uv workspace must not silently fall
+        # back to scanning the root as if no workspace existed — that
+        # would be a different audit than the user expected.
+        uv_handled = True
 
-    return units, warnings, npm_handled
+    return units, warnings, npm_handled, uv_handled
 
 
 # --- Per-ecosystem detection ----------------------------------------------
