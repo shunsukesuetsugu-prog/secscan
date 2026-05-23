@@ -123,26 +123,41 @@ def _check_workspaces(
 
     yarn_warnings = detect_yarn_unsupported(root)
     warnings.extend(yarn_warnings)
+    # Codex 21st review: a yarn-only repo whose package.json carries a
+    # ``workspaces`` field must NOT then be processed as an npm workspace
+    # — that would run ``npm audit --workspace <id>`` against a project
+    # that lacks the npm lockfile entirely. The yarn detector flags the
+    # "unsupported" condition specifically; the drift-warning case (yarn
+    # lockfile coexists with an npm/pnpm lockfile) is benign because
+    # those scanners handle it correctly.
+    yarn_blocks_npm = any("yarn workspaces" in w for w in yarn_warnings)
 
     pnpm = detect_pnpm_workspace(root)
     if pnpm is not None:
         units.extend(pnpm.units)
         warnings.extend(pnpm.warnings)
-        npm_handled = True
+        # Only suppress the single-project npm fallback when pnpm
+        # actually produced members. An empty/malformed
+        # pnpm-workspace.yaml that yielded zero units MUST still let
+        # the root project be scanned (Codex 21st BLOCKER: otherwise
+        # presence of an empty workspace config silently disables deps
+        # scanning entirely).
+        if pnpm.units:
+            npm_handled = True
 
     # Only fall through to npm-workspaces when pnpm didn't already claim
     # the project: a repo with both pnpm-workspace.yaml AND
-    # package.json#workspaces is pnpm-managed in practice.
-    if not npm_handled:
+    # package.json#workspaces is pnpm-managed in practice. Skip
+    # entirely when yarn unsupported was detected.
+    if not npm_handled and not yarn_blocks_npm:
         npm_ws = detect_npm_workspace(root)
         if npm_ws is not None:
             units.extend(npm_ws.units)
             warnings.extend(npm_ws.warnings)
-            # ``npm_handled`` reflects "workspace expansion was attempted",
-            # not "produced units". Without it, a malformed
-            # package.json#workspaces would fall through to single-project
-            # npm detection and silently re-create the root unit.
-            npm_handled = True
+            # Same logic as pnpm: only suppress single-project fallback
+            # when workspace expansion produced real units.
+            if npm_ws.units:
+                npm_handled = True
 
     uv = detect_uv_workspace(root)
     if uv is not None:

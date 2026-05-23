@@ -218,6 +218,48 @@ def test_top_level_lockfile_symlink_is_ignored(tmp_path: Path) -> None:
     assert npm.lockfile is None
 
 
+def test_pnpm_workspace_empty_falls_back_to_root_scan(tmp_path: Path) -> None:
+    """Codex 21st review BLOCKER: an empty/comments-only
+    pnpm-workspace.yaml must NOT silently disable the single-project
+    deps scan at the repo root. ``pnpm.units == ()`` is OK; the regular
+    npm/pnpm root detection should still produce one WorkUnit."""
+    (tmp_path / "pnpm-workspace.yaml").write_text("# nothing here\n")
+    (tmp_path / "package.json").write_text("{\"name\": \"root\"}")
+    (tmp_path / "package-lock.json").write_text("{}")
+    root = resolve_scan_root(tmp_path)
+    discovery = discover_for_scanner("deps", root)
+    npm_units = [w for w in discovery.work_units if w.ecosystem == "npm"]
+    assert len(npm_units) == 1
+    # Root scan is still emitted with no workspace_id.
+    assert npm_units[0].workspace_id is None
+
+
+def test_yarn_unsupported_blocks_npm_workspace_processing(
+    tmp_path: Path,
+) -> None:
+    """Codex 21st review: a yarn-only repo with package.json#workspaces
+    must NOT then be processed as an npm workspace. Otherwise we'd run
+    ``npm audit --workspace <id>`` on a project that lacks the npm
+    lockfile, producing a confusing error."""
+    (tmp_path / "yarn.lock").write_text("# yarn lock\n")
+    (tmp_path / "package.json").write_text(
+        '{"name": "root", "workspaces": ["packages/*"]}'
+    )
+    pkg = tmp_path / "packages" / "api"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text('{"name": "@org/api"}')
+    root = resolve_scan_root(tmp_path)
+    discovery = discover_for_scanner("deps", root)
+    # No workspace_id-bearing units (npm workspace expansion was skipped).
+    assert all(
+        w.workspace_id is None
+        for w in discovery.work_units
+        if w.ecosystem == "npm"
+    )
+    # The unsupported warning is surfaced.
+    assert any("yarn workspaces" in w for w in discovery.warnings)
+
+
 def test_nested_manifests_skip_symlinks(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text("{}")
     target = tmp_path / "elsewhere"

@@ -22,6 +22,7 @@ Security properties pinned by the same review:
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,15 @@ _MAX_CONFIG_SIZE_BYTES = 1 * 1024 * 1024
 # emit a warning so the user knows their topology is being truncated.
 _WORKSPACE_HARD_CAP = 100
 _WORKSPACE_WARN_THRESHOLD = 50
+
+# Characters that pnpm's ``--filter`` (and npm's ``--workspace`` to a
+# lesser extent) interpret as selector grammar. A package name that
+# contains any of these would expand to a different scope than the
+# author intended when passed verbatim as a selector — Codex 21st
+# review flagged this as a selector-injection class issue. Real npm
+# package names per the registry spec do not include these characters,
+# so refusing them is safe.
+_UNSAFE_SELECTOR_CHARS = re.compile(r"[!*^~()<>\[\]{}\s]|\.\.\.")
 
 
 @dataclass(frozen=True)
@@ -432,6 +442,25 @@ def _build_npm_units(
                     "workspace member outside scan root; skipped."
                 )
             continue
+        stripped_name = name.strip()
+        if _UNSAFE_SELECTOR_CHARS.search(stripped_name):
+            # Codex 21st review: a name containing pnpm filter grammar
+            # would expand to a scope different from this one member. We
+            # cannot safely pass it to --filter / --workspace; skip with
+            # a warning so the user sees that the member was excluded.
+            try:
+                rel = member.relative_to(root.resolved)
+                warnings.append(
+                    f"workspace member '{stripped_name}' at "
+                    f"'{rel.as_posix()}' has a name containing selector "
+                    f"grammar characters; skipped."
+                )
+            except ValueError:
+                warnings.append(
+                    f"workspace member '{stripped_name}' has a name "
+                    f"containing selector grammar characters; skipped."
+                )
+            continue
         try:
             member_path = member.relative_to(root.resolved)
         except ValueError:
@@ -445,7 +474,7 @@ def _build_npm_units(
                 manifest=manifest,
                 lockfile=_root_npm_lockfile(root, package_manager),
                 package_manager=package_manager,
-                workspace_id=name.strip(),
+                workspace_id=stripped_name,
                 workspace_member_path=member_path,
             )
         )

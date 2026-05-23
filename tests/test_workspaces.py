@@ -180,6 +180,39 @@ def test_pnpm_workspace_malformed_yaml_warns(tmp_path: Path) -> None:
     assert expansion.units == ()
 
 
+@pytest.mark.parametrize(
+    "evil_name",
+    [
+        "!internal",
+        "pkg*",
+        "pkg^1.0.0",
+        "pkg~1.0.0",
+        "pkg<{config}>",
+        "pkg(filter)",
+        "pkg space",
+        "pkg...",
+    ],
+)
+def test_workspace_member_with_selector_grammar_is_skipped(
+    tmp_path: Path, evil_name: str
+) -> None:
+    """Codex 21st review: a workspace member whose ``name`` contains
+    pnpm filter grammar (``!``, ``*``, ``^``, ``~``, ``...``, etc.)
+    must NOT be forwarded as a ``--filter`` selector — that would
+    expand to a different scope than the user expects."""
+    _write_pnpm_workspace(tmp_path, "packages:\n  - 'packages/*'\n")
+    pkg = tmp_path / "packages" / "evil"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(
+        json.dumps({"name": evil_name, "version": "1.0.0"})
+    )
+    root = resolve_scan_root(tmp_path)
+    expansion = detect_pnpm_workspace(root)
+    assert expansion is not None
+    assert all(u.workspace_id != evil_name for u in expansion.units)
+    assert any("selector grammar" in w for w in expansion.warnings)
+
+
 # --- npm workspaces (array + object forms) -------------------------------
 
 
