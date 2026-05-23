@@ -323,12 +323,21 @@ def test_long_stderr_is_redacted_before_truncation(
 ) -> None:
     """Redaction must run before truncation. If we truncate first and the
     cut splits a credential, the surviving prefix would slip past the
-    redactor pattern — a quiet leak."""
-    # Pad so the AWS key sits near the end and would be split by a naïve
-    # 500-char truncate-then-redact order.
-    padding = "x" * 600
-    aws_key = "AKIAIOSFODNN7EXAMPLE"
-    stderr = f"{padding} secret={aws_key} trailing".encode()
+    redactor pattern — a quiet leak.
+
+    Codex review: position the AWS key so it STRADDLES the 500-char
+    truncate boundary. That way:
+    - truncate-first impl: token is cut mid-string → prefix survives →
+      "AKIA" leaks past the redactor → assertion FAILS (test catches the
+      regression).
+    - redact-first impl: full pattern matches → entire key becomes
+      [REDACTED] → truncation never sees it → assertion passes.
+    """
+    aws_key = "AKIAIOSFODNN7EXAMPLE"  # 20 chars; default truncate limit is 500.
+    # Position the key so it begins around char 490 and finishes around 510:
+    # the default 500-char cut lands inside the token.
+    prefix = "x" * 490
+    stderr = f"{prefix} {aws_key} trailing-content".encode()
     fake_runner.push(returncode=2, stderr=stderr)
     fake_runner.push(returncode=0, stdout=b"")
     outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
