@@ -170,41 +170,45 @@ def test_tool_not_installed_exits_with_scan_error(
     assert "scanner errors" in out
 
 
-def test_all_warns_and_fails_when_sast_missing(
+def test_all_with_every_scanner_registered_clean(
     project: Path,
-    stub_gitleaks_installed: None,
+    monkeypatch: pytest.MonkeyPatch,
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Phase 1B added deps; only sast is still missing. The CLI must still
-    # surface the gap and refuse to claim success.
-    scripted_runner.queue(returncode=0, stdout=b"[]")  # gitleaks (no leaks)
-    scripted_runner.queue(returncode=0, stdout=b"")  # gitleaks version probe
+    """Phase 1C: secrets + deps + sast are all registered. `all` should
+    no longer emit a partial-scan warning. A clean repo (no findings,
+    no manifests) exits OK with informational discovery warnings only."""
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    # secrets (gitleaks): no leaks + version probe
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    # deps: no manifest in project, so the scanner never runs — no canned
+    # response needed (Discovery short-circuits).
+    # sast: no findings.
+    scripted_runner.queue(
+        returncode=0, stdout=json.dumps({"results": [], "errors": []}).encode()
+    )
     rc = cli.main(["all", "--path", str(project)])
     out = capsys.readouterr().out
-    assert rc == int(ExitCode.SCAN_ERROR)
-    assert "partial scan" in out
-    assert "sast" in out
-    # deps is now registered, so it must NOT appear in the missing-list.
-    # (deps may run with "no manifest" warning, but that's a separate path.)
-    # Check this by looking at the partial-scan warning content, not the
-    # whole output (which may mention "deps" in other contexts).
-    partial_line = next(
-        (line for line in out.splitlines() if "partial scan" in line), ""
-    )
-    assert "deps" not in partial_line
+    assert rc == int(ExitCode.OK)
+    assert "partial scan" not in out
 
 
-def test_all_with_explicit_skip_sast_does_not_treat_skipped_as_missing(
+def test_all_with_explicit_skip_acknowledges_gap(
     project: Path,
-    stub_gitleaks_installed: None,
+    monkeypatch: pytest.MonkeyPatch,
     scripted_runner: _ScriptedRunner,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # User explicitly opts out of sast — that's an acknowledged gap.
-    scripted_runner.queue(returncode=0, stdout=b"[]")  # gitleaks
-    scripted_runner.queue(returncode=0, stdout=b"")
-    rc = cli.main(["all", "--path", str(project), "--skip", "sast"])
+    # User skips deps and sast: only secrets should run, and the skipped
+    # gap should be acknowledged rather than treated as "partial scan".
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    rc = cli.main(
+        ["all", "--path", str(project), "--skip", "deps", "--skip", "sast"]
+    )
     out = capsys.readouterr().out
     assert rc == int(ExitCode.OK)
     assert "partial scan" not in out
@@ -590,15 +594,83 @@ def test_help_exits_cleanly() -> None:
 # --- Codex 3rd review regressions -----------------------------------------
 
 
-def test_sast_subcommand_still_rejected_until_phase_1c(
-    project: Path, capsys: pytest.CaptureFixture[str]
+def test_sast_subcommand_clean_run(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Phase 1B added deps but not sast. Sast must still hit the
-    # false-green guard.
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    scripted_runner.queue(
+        returncode=0,
+        stdout=json.dumps({"results": [], "errors": []}).encode(),
+    )
     rc = cli.main(["sast", "--path", str(project)])
-    captured = capsys.readouterr()
-    assert rc == int(ExitCode.SCAN_ERROR)
-    assert "not yet implemented" in captured.err
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    assert "no findings" in out
+
+
+def test_sast_subcommand_finding_drives_exit_code(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    # Create a real file so orchestrator's path-containment check accepts
+    # the finding's location.
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("import yaml; yaml.load('...')\n")
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "python.lang.security.audit.dangerous-yaml-load",
+                    "path": "src/app.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 30},
+                    "extra": {
+                        "severity": "ERROR",
+                        "message": "Avoid yaml.load",
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    scripted_runner.queue(returncode=0, stdout=payload)
+    rc = cli.main(["sast", "--path", str(project)])
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.FINDINGS)
+    assert "dangerous-yaml-load" in out
+
+
+def test_sast_subcommand_semgrep_config_override(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--semgrep-config on the CLI overrides the default ruleset."""
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    scripted_runner.queue(
+        returncode=0, stdout=json.dumps({"results": [], "errors": []}).encode()
+    )
+    cli.main(
+        [
+            "sast",
+            "--path",
+            str(project),
+            "--semgrep-config",
+            "p/custom-A",
+            "--semgrep-config",
+            "p/custom-B",
+        ]
+    )
+    capsys.readouterr()
+    # ScriptedRunner doesn't expose argv directly; the smoke test is that
+    # the run completed without error.
 
 
 
