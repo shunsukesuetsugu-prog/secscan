@@ -215,11 +215,15 @@ def _render_summary(
 def _render_quiet(result: RunResult, decision: PolicyDecision) -> str:
     """Single-line summary for --quiet.
 
-    Always non-empty so CI logs at least record the verdict.
+    Always non-empty so CI logs at least record the verdict. Codex 13th
+    review: we must include ``warnings=`` here so an "scan completed but
+    semgrep had parse errors" run cannot read as findings=0 errors=0
+    exit=0 in CI logs.
     """
     return (
         f"secscan: findings={len(result.findings)} "
         f"errors={len(result.errors)} "
+        f"warnings={len(result.warnings)} "
         f"crossing={len(decision.crossing_findings)} "
         f"exit={int(decision.exit_code)}"
     )

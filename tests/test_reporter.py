@@ -197,6 +197,7 @@ def test_quiet_mode_emits_single_machine_line() -> None:
     rr = RunResult(
         findings=(_finding(),),
         errors=(ScannerError(scanner="x", reason="r"),),
+        warnings=("semgrep error: rules failed to parse",),
     )
     decision = evaluate(rr, ProjectConfig())
     out = render_report(rr, decision, ReportOptions(quiet=True))
@@ -204,6 +205,10 @@ def test_quiet_mode_emits_single_machine_line() -> None:
     assert len(lines) == 1
     assert "findings=1" in out
     assert "errors=1" in out
+    # Codex 13th review: warnings count must be visible in quiet mode so
+    # semgrep parse-errors (and similar) can't read as findings=0 errors=0
+    # exit=0 in CI logs.
+    assert "warnings=1" in out
     assert "exit=" in out
 
 

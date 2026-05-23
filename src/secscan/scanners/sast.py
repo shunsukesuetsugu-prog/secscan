@@ -483,7 +483,15 @@ def _reject_unsafe_configs(
     for cfg in configs:
         if cfg.startswith(("p/", "r/")):
             continue
-        # Treat as a path; accept if it's a real file under the scan root.
+        # Codex 13th review: URL-like strings (anything with a scheme
+        # separator) must NEVER fall into the path-resolution branch.
+        # ``Path("https://evil/rules.yml").resolve()`` happily produces
+        # ``<cwd>/https:/evil/rules.yml`` which then passes the
+        # ``relative_to(scan_root)`` check when ``cwd == scan_root``.
+        if "://" in cfg:
+            bad.append(cfg)
+            continue
+        # Treat as a path; accept if it resolves under the scan root.
         try:
             candidate = Path(cfg).resolve(strict=False)
             scan_root_resolved = scan_root.resolve(strict=False)

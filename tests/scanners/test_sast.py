@@ -819,7 +819,14 @@ def test_remote_url_is_rejected_by_default(
     scanner: SastScanner,
     fake_runner: FakeRunner,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Codex 13th review: previously ``Path('https://evil/...').resolve()``
+    silently produced ``<cwd>/https:/evil/...`` which then passed
+    ``relative_to(scan_root)`` when ``cwd == scan_root``. The gate must
+    reject anything with a URL scheme outright. We chdir into the scan
+    root to reproduce the original bypass conditions."""
+    monkeypatch.chdir(tmp_path)
     outcome = scanner.scan(
         WorkUnit(root=tmp_path),
         fake_runner,
@@ -830,6 +837,28 @@ def test_remote_url_is_rejected_by_default(
     assert "unverified" in outcome.error.reason
     # MUST NOT have invoked semgrep — the rejection happens before exec.
     assert fake_runner.calls == []
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_url_with_any_scheme_is_rejected_by_default(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any string containing a scheme separator (://) is treated as a URL
+    and rejected, even non-http schemes that semgrep itself wouldn't
+    follow. Belt-and-braces."""
+    monkeypatch.chdir(tmp_path)
+    for cfg in (
+        "file:///etc/passwd",
+        "ftp://example.com/rules",
+        "scp://server/rules",
+    ):
+        outcome = scanner.scan(
+            WorkUnit(root=tmp_path), fake_runner, _config_with_semgrep(cfg)
+        )
+        assert not outcome.succeeded, f"{cfg} unexpectedly accepted"
 
 
 @pytest.mark.usefixtures("stub_semgrep")
