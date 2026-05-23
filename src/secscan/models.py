@@ -175,11 +175,18 @@ class ScanOutcome:
     populated (and ``findings`` is empty). The two are mutually exclusive at
     the scanner boundary — partial-success is represented at the Orchestrator
     level by RunResult.
+
+    ``warnings`` carries non-fatal scanner-level notes that the user should
+    see — e.g. semgrep's top-level ``errors`` array (rule-parse failures
+    that did not abort the run). These are NOT findings; they signal that
+    the report itself is incomplete or potentially noisy. The Orchestrator
+    forwards them to ``RunResult.warnings`` so the reporter surfaces them.
     """
 
     scanner: str
     findings: tuple[Finding, ...] = ()
     error: ScannerError | None = None
+    warnings: tuple[str, ...] = ()
     tool_version: str | None = None
     duration_seconds: float = 0.0
 

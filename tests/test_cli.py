@@ -376,6 +376,12 @@ def test_no_baseline_disables_baseline(
     #   1. Run accept --all to populate the baseline from a real scan.
     #   2. Rerun: baseline should suppress -> OK.
     #   3. Rerun with --no-baseline: same finding -> FINDINGS.
+    # Skip deps + sast in the project's config so accept doesn't trip the
+    # new "scanner-errors block accept" guard (deps + sast would error
+    # since this synthetic project has no manifest / semgrep_config).
+    (project / ".secscan.toml").write_text(
+        '[scan]\nskip = ["deps", "sast"]\n'
+    )
     leak = json.dumps(
         [
             {
@@ -534,6 +540,9 @@ def test_baseline_accept_all_writes_entries(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("SECSCAN_CI", raising=False)
+    (project / ".secscan.toml").write_text(
+        '[scan]\nskip = ["deps", "sast"]\n'
+    )
     leak = json.dumps(
         [
             {
@@ -773,6 +782,9 @@ def test_baseline_accept_rejects_unknown_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    (project / ".secscan.toml").write_text(
+        '[scan]\nskip = ["deps", "sast"]\n'
+    )
     # accept --fingerprint must refuse fingerprints that don't appear in
     # the current scan output: otherwise users could accept arbitrary
     # strings, polluting the baseline with entries that suppress nothing

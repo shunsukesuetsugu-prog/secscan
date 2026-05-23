@@ -77,6 +77,12 @@ class DepsConfig:
 class SastConfig:
     semgrep_config: tuple[str, ...] = DEFAULT_SEMGREP_CONFIG
     timeout_seconds: int = DEFAULT_SAST_TIMEOUT
+    allow_unverified_configs: bool = False
+    """If True, accept arbitrary URLs / absolute out-of-tree paths as
+    semgrep configs. Defaults False: only registry shorthand (``p/...``,
+    ``r/...``) and paths under the scan root are accepted, because an
+    untrusted PR that edits ``.secscan.toml`` could otherwise point
+    semgrep at a malicious ruleset. Codex 12th review."""
 
 
 @dataclass(frozen=True)
@@ -346,7 +352,11 @@ def _parse_deps(table: dict[str, object]) -> DepsConfig:
 
 
 def _parse_sast(table: dict[str, object]) -> SastConfig:
-    _reject_unknown(table, {"semgrep_config", "timeout_seconds"}, "sast")
+    _reject_unknown(
+        table,
+        {"semgrep_config", "timeout_seconds", "allow_unverified_configs"},
+        "sast",
+    )
     return SastConfig(
         semgrep_config=_require_str_list(
             table.get("semgrep_config", list(DEFAULT_SEMGREP_CONFIG)),
@@ -356,6 +366,10 @@ def _parse_sast(table: dict[str, object]) -> SastConfig:
             table.get("timeout_seconds", DEFAULT_SAST_TIMEOUT),
             "sast.timeout_seconds",
             minimum=1,
+        ),
+        allow_unverified_configs=_require_bool(
+            table.get("allow_unverified_configs", False),
+            "sast.allow_unverified_configs",
         ),
     )
 

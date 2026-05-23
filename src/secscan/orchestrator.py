@@ -126,7 +126,13 @@ def run_scanners(
             # we can't vouch for.
             outcome = _sanitize_outcome_paths(outcome, scan_root)
 
-            _accumulate(outcome, findings=findings, errors=errors, tool_versions=tool_versions)
+            _accumulate(
+                outcome,
+                findings=findings,
+                errors=errors,
+                warnings=warnings,
+                tool_versions=tool_versions,
+            )
 
     # Apply overrides BEFORE baseline matching: a finding upgraded from
     # MEDIUM to CRITICAL still has the same fingerprint, so this ordering
@@ -192,7 +198,12 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
     if scanner_name == "sast":
         return ScanConfig(
             timeout_seconds=config.sast.timeout_seconds,
-            extra=MappingProxyType({"semgrep_config": config.sast.semgrep_config}),
+            extra=MappingProxyType(
+                {
+                    "semgrep_config": config.sast.semgrep_config,
+                    "allow_unverified_configs": config.sast.allow_unverified_configs,
+                }
+            ),
         )
     if scanner_name == "secrets":
         return ScanConfig(timeout_seconds=config.secrets.timeout_seconds)
@@ -205,12 +216,18 @@ def _accumulate(
     *,
     findings: list[Finding],
     errors: list[ScannerError],
+    warnings: list[str],
     tool_versions: dict[str, str],
 ) -> None:
     if outcome.error is not None:
         errors.append(outcome.error)
     else:
         findings.extend(outcome.findings)
+    # Per-scanner non-fatal warnings always surface, regardless of whether
+    # the scanner succeeded or errored — semgrep's parse-failure notes
+    # (Codex 12th review) are exactly this kind of "report is incomplete
+    # but you still get something".
+    warnings.extend(outcome.warnings)
     if outcome.tool_version:
         tool_versions[outcome.scanner] = outcome.tool_version
 

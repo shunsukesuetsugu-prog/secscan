@@ -24,6 +24,7 @@ from secscan.scanners.sast import (
     SastScanner,
     build_findings_from_semgrep,
     classify_semgrep_exit,
+    extract_semgrep_warnings,
     semgrep_argv,
 )
 
@@ -588,3 +589,277 @@ def test_scan_timeout_returns_scanner_error(
     assert not outcome.succeeded
     assert outcome.error is not None
     assert "timed out" in outcome.error.reason
+
+
+# --- Codex 12th review: semgrep errors must surface as warnings ----------
+
+
+def test_extract_warnings_from_empty_errors() -> None:
+    payload = json.dumps({"results": [], "errors": []}).encode()
+    assert extract_semgrep_warnings(payload) == ()
+
+
+def test_extract_warnings_redacts_and_truncates() -> None:
+    payload = json.dumps(
+        {
+            "results": [],
+            "errors": [
+                {
+                    "level": "error",
+                    "message": "parse failed: AKIAIOSFODNN7EXAMPLE in pattern",
+                }
+            ],
+        }
+    ).encode()
+    (w,) = extract_semgrep_warnings(payload)
+    assert "AKIAIOSFODNN7EXAMPLE" not in w
+    assert "semgrep error" in w
+
+
+def test_extract_warnings_caps_at_max() -> None:
+    """A chatty semgrep run can emit hundreds of parse errors. We cap the
+    surfaced count so the report stays usable."""
+    errs = [
+        {"level": "error", "message": f"problem-{i}"} for i in range(20)
+    ]
+    payload = json.dumps({"results": [], "errors": errs}).encode()
+    warnings = extract_semgrep_warnings(payload)
+    assert len(warnings) <= 6  # 5 items + 1 summary line
+    assert any("omitted" in w for w in warnings)
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_scan_surfaces_semgrep_errors_as_warnings(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    default_config: ScanConfig,
+    tmp_path: Path,
+) -> None:
+    """The critical regression Codex 12th flagged: findings=0 + non-empty
+    errors must NOT read as 'clean'. ScanOutcome.warnings carries them."""
+    payload = json.dumps(
+        {
+            "results": [],
+            "errors": [
+                {"level": "error", "message": "failed to parse rules.yml"}
+            ],
+        }
+    ).encode()
+    fake_runner.push(returncode=0, stdout=payload)
+    outcome = scanner.scan(WorkUnit(root=tmp_path), fake_runner, default_config)
+    assert outcome.succeeded  # the scan itself ran
+    assert outcome.findings == ()
+    assert outcome.warnings  # but the user gets a warning
+    assert any("rules.yml" in w for w in outcome.warnings)
+
+
+# --- Codex 12th review: reference sanitization ----------------------------
+
+
+def test_reference_with_control_chars_is_dropped(tmp_path: Path) -> None:
+    """Semgrep ruleset metadata is user-controlled. ANSI escapes /
+    control characters in references would corrupt the report."""
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "x",
+                    "path": "a.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 5},
+                    "extra": {
+                        "severity": "ERROR",
+                        "message": "m",
+                        "metadata": {
+                            "references": [
+                                "\x1b[31mhttps://evil.example/ansi\x1b[0m"
+                            ]
+                        },
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    (f,) = build_findings_from_semgrep(payload, scan_root=tmp_path)
+    # The control characters must be stripped; URL itself can pass through.
+    for ref in f.references:
+        assert "\x1b" not in ref
+
+
+def test_non_http_reference_is_dropped(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "x",
+                    "path": "a.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 5},
+                    "extra": {
+                        "severity": "ERROR",
+                        "message": "m",
+                        "metadata": {
+                            "references": [
+                                "javascript:alert(1)",  # NOT http/https
+                                "file:///etc/passwd",  # also rejected
+                                "https://example.com/ok",  # accepted
+                            ]
+                        },
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    (f,) = build_findings_from_semgrep(payload, scan_root=tmp_path)
+    assert all(r.startswith(("http://", "https://")) for r in f.references)
+    assert "javascript:alert(1)" not in f.references
+    assert any("example.com" in r for r in f.references)
+
+
+def test_reference_with_credential_is_redacted(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "x",
+                    "path": "a.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 5},
+                    "extra": {
+                        "severity": "ERROR",
+                        "message": "m",
+                        "metadata": {
+                            "references": [
+                                "https://alice:secret@docs.example.com/r"
+                            ]
+                        },
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    (f,) = build_findings_from_semgrep(payload, scan_root=tmp_path)
+    assert f.references
+    assert all("alice:secret" not in r for r in f.references)
+
+
+def test_reference_length_is_capped(tmp_path: Path) -> None:
+    long_url = "https://example.com/" + ("x" * 1000)
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "x",
+                    "path": "a.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 5},
+                    "extra": {
+                        "severity": "ERROR",
+                        "message": "m",
+                        "metadata": {"references": [long_url]},
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    (f,) = build_findings_from_semgrep(payload, scan_root=tmp_path)
+    for r in f.references:
+        assert len(r) <= 200
+
+
+# --- Codex 12th review: semgrep_config safety gate -----------------------
+
+
+def _config_with_semgrep(*configs: str, allow_unverified: bool = False) -> ScanConfig:
+    return ScanConfig(
+        extra=MappingProxyType(
+            {
+                "semgrep_config": configs,
+                "allow_unverified_configs": allow_unverified,
+            }
+        )
+    )
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_registry_shorthand_p_prefix_is_accepted(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+) -> None:
+    fake_runner.push(returncode=0, stdout=b'{"results": [], "errors": []}')
+    outcome = scanner.scan(
+        WorkUnit(root=tmp_path), fake_runner, _config_with_semgrep("p/python")
+    )
+    assert outcome.succeeded
+    assert fake_runner.calls != []
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_local_path_inside_scan_root_is_accepted(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+) -> None:
+    rule = tmp_path / "rule.yml"
+    rule.write_text("rules: []")
+    fake_runner.push(returncode=0, stdout=b'{"results": [], "errors": []}')
+    outcome = scanner.scan(
+        WorkUnit(root=tmp_path), fake_runner, _config_with_semgrep(str(rule))
+    )
+    assert outcome.succeeded
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_remote_url_is_rejected_by_default(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+) -> None:
+    outcome = scanner.scan(
+        WorkUnit(root=tmp_path),
+        fake_runner,
+        _config_with_semgrep("https://evil.example.com/rules.yml"),
+    )
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "unverified" in outcome.error.reason
+    # MUST NOT have invoked semgrep — the rejection happens before exec.
+    assert fake_runner.calls == []
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_outside_path_is_rejected_by_default(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+) -> None:
+    # /etc/passwd is a real absolute path outside the scan root.
+    outcome = scanner.scan(
+        WorkUnit(root=tmp_path),
+        fake_runner,
+        _config_with_semgrep("/etc/passwd"),
+    )
+    assert not outcome.succeeded
+    assert outcome.error is not None
+
+
+@pytest.mark.usefixtures("stub_semgrep")
+def test_remote_url_accepted_with_opt_in(
+    scanner: SastScanner,
+    fake_runner: FakeRunner,
+    tmp_path: Path,
+) -> None:
+    fake_runner.push(returncode=0, stdout=b'{"results": [], "errors": []}')
+    outcome = scanner.scan(
+        WorkUnit(root=tmp_path),
+        fake_runner,
+        _config_with_semgrep(
+            "https://example.com/rules.yml", allow_unverified=True
+        ),
+    )
+    assert outcome.succeeded

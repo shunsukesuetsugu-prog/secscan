@@ -342,6 +342,20 @@ def _baseline_accept(
         runner=runner,
     )
 
+    # Codex 12th review: refusing to accept when the scan was inconclusive
+    # prevents users from locking in a baseline that's missing real findings
+    # because one of the scanners errored out.
+    if outcome.result.errors:
+        scanners_in_error = ", ".join(
+            sorted({e.scanner for e in outcome.result.errors})
+        )
+        _print_error(
+            f"refusing to accept findings: one or more scanners failed "
+            f"({scanners_in_error}). Resolve the scanner error(s) first so "
+            f"the baseline reflects a complete scan."
+        )
+        return int(ExitCode.SCAN_ERROR)
+
     candidates = outcome.result.findings
     if args.accept_all:
         selected = candidates

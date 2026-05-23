@@ -12,21 +12,20 @@ Implementation notes pinned by past Codex reviews:
 - ``semgrep_config`` is a tuple of rulesets. Each entry gets its own
   ``--config`` flag — semgrep stacks multiple configs left-to-right.
 - ``results[].extra.fingerprint`` exists in Semgrep AppSec Platform output
-  but NOT in CE. When present we record it as ``raw_fingerprint`` and
-  prefer it for matching. Otherwise we compose:
-  ``rule_id + relative_file + start_line + start_col + end_line + end_col``.
-  This makes the fingerprint immune to mere line-content reformatting
-  while still distinguishing two findings on the same rule+line that
-  differ in column span.
+  but NOT in CE. When present we record it as ``raw_fingerprint`` purely
+  for cross-tool reconciliation; baseline matching is driven by the
+  canonical composite fingerprint (``rule_id + relative_file +
+  start_line + start_col + end_line + end_col``) so AppSec users and CE
+  users get identical baselines for the same finding.
 - ``results[].extra.severity`` strings are ERROR / WARNING / INFO. We map
   to HIGH / MEDIUM / LOW respectively. Anything we don't recognize maps
   to UNKNOWN (let policy.severity_unknown_policy decide).
 - ``errors`` entries inside the JSON envelope are NOT findings — they are
-  parser / config / engine errors. We surface them as warnings on the
-  ``RunResult`` (via ``tool_version``-style metadata) — the scanner does
-  not raise. A future ``ScanOutcome.warnings`` field could carry them
-  natively; for MVP we attach them to ``ScannerError`` only if the run
-  itself failed.
+  parser / config / engine errors. The scanner surfaces them via
+  ``ScanOutcome.warnings`` so the user knows the report may be
+  incomplete. Codex 12th review flagged that silently dropping these is
+  a SAST false-clean path: findings=0 + non-empty errors should never
+  read as "clean".
 """
 
 from __future__ import annotations
@@ -110,6 +109,22 @@ class SastScanner(Scanner):
                 duration=0.0,
             )
 
+        allow_unverified = bool(config.extra.get("allow_unverified_configs", False))
+        rejected = _reject_unsafe_configs(
+            configs, scan_root=unit.root, allow_unverified=allow_unverified
+        )
+        if rejected:
+            return _error(
+                "sast scanner refused unverified semgrep config(s): "
+                + ", ".join(rejected)
+                + ". Use registry shorthand (e.g. p/python) or a path inside "
+                "the scan root, or set [sast].allow_unverified_configs=true "
+                "to opt in.",
+                stderr=b"",
+                returncode=None,
+                duration=0.0,
+            )
+
         argv = semgrep_argv(unit_root=unit.root, configs=configs)
         result = runner.run(
             argv, cwd=unit.root, timeout_seconds=config.timeout_seconds
@@ -124,6 +139,7 @@ class SastScanner(Scanner):
             )
         try:
             findings = build_findings_from_semgrep(result.stdout, scan_root=unit.root)
+            warnings = extract_semgrep_warnings(result.stdout)
         except _SemgrepParseError as exc:
             return _error(
                 str(exc),
@@ -134,6 +150,7 @@ class SastScanner(Scanner):
         return ScanOutcome(
             scanner=self.name,
             findings=findings,
+            warnings=warnings,
             tool_version=None,
             duration_seconds=result.duration_seconds,
         )
@@ -209,6 +226,53 @@ class _SemgrepParseError(ValueError):
     Internal to this module — the Scanner catches it and converts to a
     ScannerError outcome.
     """
+
+
+def extract_semgrep_warnings(stdout: bytes) -> tuple[str, ...]:
+    """Pull semgrep's top-level ``errors`` array out and format as warnings.
+
+    Semgrep emits parser/config/engine errors here even when the scan
+    itself completed. Treating these as "no findings, all good" is the
+    SAST false-clean path Codex 12th review flagged. We hand the strings
+    back as warnings so the reporter surfaces them; we do NOT escalate
+    them to ScannerError because the rest of the scan IS valid.
+
+    Each warning is redacted (defense in depth) and truncated to 200
+    chars so a chatty engine error can't flood the report.
+    """
+    text = decode_output(stdout).strip()
+    if not text:
+        return ()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    errs = data.get("errors")
+    if not isinstance(errs, list) or not errs:
+        return ()
+    notes: list[str] = []
+    for err in errs:
+        if isinstance(err, dict):
+            level = _first_str(err.get("level")) or "error"
+            msg = (
+                _first_str(err.get("message"))
+                or _first_str(err.get("short_msg"))
+                or _first_str(err.get("type"))
+                or "(no message)"
+            )
+            notes.append(
+                truncate(redact_text(f"semgrep {level}: {msg}"), limit=200)
+            )
+        elif isinstance(err, str):
+            notes.append(truncate(redact_text(f"semgrep error: {err}"), limit=200))
+    # Cap to avoid drowning the user. If there are more, summarize.
+    MAX = 5
+    if len(notes) > MAX:
+        omitted = len(notes) - MAX
+        return (*notes[:MAX], f"(+{omitted} more semgrep errors omitted)")
+    return tuple(notes)
 
 
 def build_findings_from_semgrep(
@@ -316,21 +380,53 @@ def _severity_from_extra(extra: dict[str, Any]) -> Severity:
     return Severity.UNKNOWN
 
 
+_REFERENCE_MAX_LEN = 200
+_REFERENCE_ALLOWED_SCHEME = ("https://", "http://")
+
+
+def _sanitize_reference(ref: str) -> str | None:
+    """Apply defense-in-depth to a single reference string.
+
+    Semgrep ruleset metadata is effectively user-controlled (anyone can
+    publish or PR a rule). Codex 12th review flagged that letting the
+    string flow into the reporter verbatim opens up control-character
+    injection, ANSI escapes, credential leaks, and unbounded length.
+    Caller already type-checked; we just sanitize.
+    """
+    # Strip surrounding whitespace and control chars (including ANSI ESC).
+    cleaned = "".join(ch for ch in ref if ch.isprintable() and ch not in ("\x1b",))
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if not cleaned.startswith(_REFERENCE_ALLOWED_SCHEME):
+        return None
+    if len(cleaned) > _REFERENCE_MAX_LEN:
+        cleaned = cleaned[: _REFERENCE_MAX_LEN - 3] + "..."
+    cleaned = redact_text(cleaned)
+    return cleaned
+
+
 def _collect_references(extra: dict[str, Any]) -> tuple[str, ...]:
     metadata: dict[str, Any] = (
         extra["metadata"] if isinstance(extra.get("metadata"), dict) else {}
     )
-    refs: list[str] = []
+    candidates: list[str] = []
     references = metadata.get("references")
     if isinstance(references, list):
         for ref in references:
-            if isinstance(ref, str) and ref and ref not in refs:
-                refs.append(ref)
+            if isinstance(ref, str) and ref:
+                candidates.append(ref)
     elif isinstance(references, str) and references:
-        refs.append(references)
+        candidates.append(references)
     source = metadata.get("source")
-    if isinstance(source, str) and source and source not in refs:
-        refs.append(source)
+    if isinstance(source, str) and source:
+        candidates.append(source)
+
+    refs: list[str] = []
+    for cand in candidates:
+        cleaned = _sanitize_reference(cand)
+        if cleaned and cleaned not in refs:
+            refs.append(cleaned)
     return tuple(refs[:5])  # cap
 
 
@@ -360,6 +456,44 @@ def _coerce_semgrep_configs(value: object) -> tuple[str, ...]:
     if isinstance(value, str) and value.strip():
         return (value.strip(),)
     return ()
+
+
+def _reject_unsafe_configs(
+    configs: Sequence[str], *, scan_root: Path, allow_unverified: bool
+) -> tuple[str, ...]:
+    """Return the configs that are NOT in the default-safe set.
+
+    Default-safe means:
+    - Semgrep registry shorthand starting with ``p/`` or ``r/`` (Semgrep's
+      public ruleset namespaces), OR
+    - A local filesystem path under the scan root.
+
+    Anything else (arbitrary URL, absolute path outside the scan root, etc.)
+    requires the user to opt in via ``[sast].allow_unverified_configs=true``.
+
+    Codex 12th review: an untrusted PR that modifies ``.secscan.toml`` could
+    otherwise tell semgrep to fetch a malicious ruleset (which can include
+    rule actions that exfiltrate code via patterns / metavariables) or to
+    read out-of-tree files. This gate is a reasonable middle ground for
+    MVP — strict by default, opt-in if needed.
+    """
+    if allow_unverified:
+        return ()
+    bad: list[str] = []
+    for cfg in configs:
+        if cfg.startswith(("p/", "r/")):
+            continue
+        # Treat as a path; accept if it's a real file under the scan root.
+        try:
+            candidate = Path(cfg).resolve(strict=False)
+            scan_root_resolved = scan_root.resolve(strict=False)
+            candidate.relative_to(scan_root_resolved)
+            # Inside the scan root → safe.
+            continue
+        except (ValueError, OSError):
+            pass
+        bad.append(cfg)
+    return tuple(bad)
 
 
 def _composite_fingerprint(
