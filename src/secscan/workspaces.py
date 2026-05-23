@@ -339,11 +339,16 @@ def _build_uv_units(
                 warnings.append("uv workspace member outside scan root; skipped.")
             continue
         stripped = name.strip()
-        if not _VALID_DIST_NAME.match(stripped) or _UNSAFE_SELECTOR_CHARS.search(stripped):
+        # Codex 26th review: ``_UNSAFE_SELECTOR_CHARS`` exists to defend
+        # the npm/pnpm ``--filter`` / ``--workspace`` argument from
+        # selector grammar. uv has no such grammar; running ``--package
+        # foo...bar`` is literal. So uv validation goes through
+        # ``_VALID_DIST_NAME`` only (PEP 508), which legitimately accepts
+        # adjacent separators like ``foo...bar``.
+        if not _VALID_DIST_NAME.match(stripped):
             warnings.append(
                 f"uv workspace member name '{stripped}' is not a valid PEP "
-                f"508/503 distribution name or contains unsafe characters; "
-                f"skipped."
+                f"508/503 distribution name; skipped."
             )
             continue
         canonical = _canonicalize_pep503(stripped)

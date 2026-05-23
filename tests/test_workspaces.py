@@ -390,6 +390,7 @@ def test_uv_workspace_rejects_trailing_separator_or_invalid_chars(
         "foo_bar",
         "foo--bar",         # adjacent hyphens are LEGAL (Codex 25th).
         "foo..bar",         # adjacent dots also legal.
+        "foo...bar",        # 3 adjacent dots: legal per PEP 508 / Codex 26th.
         "foo.bar-baz_qux",  # mixed separators.
         "1foo",             # digit-leading is fine.
     ],
