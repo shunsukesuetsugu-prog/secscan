@@ -1,0 +1,390 @@
+"""Command-line entry point.
+
+Argument parsing, config resolution, scanner registration, output, exit. The
+CLI is intentionally thin: anything testable lives in orchestrator / policy
+/ reporter / baseline.
+
+Subcommand structure (Phase 1A — Phase 1B/1C will register additional
+scanners but the CLI shape does not change):
+
+    secscan secrets   [options]
+    secscan deps      [options]      # Phase 1B
+    secscan sast      [options]      # Phase 1C
+    secscan all       [options]      # Phase 1D
+    secscan baseline  accept|list|prune
+
+Exit codes follow ``exit_codes.ExitCode``. SIGINT yields 130 (POSIX).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
+
+from . import __version__
+from .baseline import (
+    BaselineError,
+    build_entry,
+    is_ci_environment,
+    load_baseline,
+    merge_entries,
+    prune_expired,
+    save_baseline,
+)
+from .config import ConfigError, ProjectConfig, load_config
+from .exit_codes import ExitCode
+from .models import Severity
+from .orchestrator import run_scanners
+from .path_safety import PathSafetyError, resolve_scan_root
+from .reporter import ReportOptions, render_report
+from .runner import SubprocessCommandRunner
+from .scanners.base import Scanner
+from .scanners.secrets import SecretsScanner
+
+# Registry of scanners available in this build. Phase 1B/1C will append.
+ALL_SCANNERS: list[type[Scanner]] = [SecretsScanner]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point. Returns an integer exit code instead of calling sys.exit
+    so tests can drive the CLI without process teardown."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        return _dispatch(args)
+    except KeyboardInterrupt:
+        return int(ExitCode.INTERRUPTED)
+
+
+# --- Parser ----------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="secscan",
+        description="Cross-project vulnerability scanning (deps / sast / secrets).",
+    )
+    parser.add_argument("--version", action="version", version=f"secscan {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # secscan secrets / deps / sast / all — share flags.
+    for cmd in ("secrets", "deps", "sast", "all"):
+        sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
+        _add_common_scan_args(sub)
+        if cmd == "all":
+            sub.add_argument(
+                "--skip",
+                action="append",
+                default=[],
+                metavar="SCANNER",
+                help="scanner to skip (repeatable). Choices: secrets, deps, sast.",
+            )
+        if cmd == "sast":
+            sub.add_argument(
+                "--semgrep-config",
+                action="append",
+                default=None,
+                metavar="RULESET",
+                help="override semgrep --config (repeatable).",
+            )
+        if cmd == "deps":
+            sub.add_argument(
+                "--allow-missing-lockfile",
+                action="store_true",
+                help="proceed even when a project has no lockfile.",
+            )
+
+    # secscan baseline …
+    baseline_parser = subparsers.add_parser(
+        "baseline", help="manage the baseline (known-issue suppression file)"
+    )
+    bl_sub = baseline_parser.add_subparsers(dest="baseline_command", required=True)
+
+    accept = bl_sub.add_parser("accept", help="record findings as accepted")
+    accept.add_argument("--path", default=".", help="scan root (default: cwd)")
+    accept.add_argument(
+        "--fingerprint",
+        action="append",
+        default=[],
+        metavar="HASH",
+        help="fingerprint to accept (repeatable). Required unless --all is given.",
+    )
+    accept.add_argument(
+        "--all",
+        dest="accept_all",
+        action="store_true",
+        help="accept EVERY current finding. Use with care.",
+    )
+    accept.add_argument(
+        "--reason",
+        required=True,
+        help="non-empty justification recorded with each entry.",
+    )
+    accept.add_argument(
+        "--expiry-days",
+        type=int,
+        default=None,
+        help="override config's default_expiry_days for the new entries.",
+    )
+
+    bl_list = bl_sub.add_parser("list", help="show baseline entries")
+    bl_list.add_argument("--path", default=".", help="scan root (default: cwd)")
+
+    bl_prune = bl_sub.add_parser("prune", help="remove expired baseline entries")
+    bl_prune.add_argument("--path", default=".", help="scan root (default: cwd)")
+
+    return parser
+
+
+def _add_common_scan_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--path", default=".", help="scan root (default: cwd)")
+    parser.add_argument(
+        "--fail-on",
+        choices=["critical", "high", "medium", "low", "none"],
+        default=None,
+        help="severity threshold for non-zero exit (default: from config; high)",
+    )
+    parser.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="ignore any baseline file for this run.",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="disable ANSI colors even on a TTY.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="emit a single-line summary instead of the full report.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show suppressed findings and extended metadata.",
+    )
+
+
+# --- Dispatch --------------------------------------------------------------
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "baseline":
+        return _dispatch_baseline(args)
+    return _dispatch_scan(args)
+
+
+def _dispatch_scan(args: argparse.Namespace) -> int:
+    try:
+        scan_root = resolve_scan_root(args.path)
+    except PathSafetyError as exc:
+        _print_error(f"path error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
+
+    try:
+        config = load_config(scan_root.resolved)
+    except ConfigError as exc:
+        _print_error(f"config error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
+
+    config = _apply_cli_overrides(config, args)
+
+    only: tuple[str, ...] | None = None if args.command == "all" else (args.command,)
+
+    scanners = [cls() for cls in ALL_SCANNERS]
+
+    runner = SubprocessCommandRunner()
+    try:
+        outcome = run_scanners(
+            scanners,
+            scan_root=scan_root,
+            config=config,
+            runner=runner,
+            only=only,
+        )
+    except BaselineError as exc:
+        # We surface baseline errors at this level (parse failures during
+        # apply, etc.) — never silently ignore them.
+        _print_error(f"baseline error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
+
+    options = ReportOptions(
+        use_color=_should_use_color(args, sys.stdout),
+        verbose=getattr(args, "verbose", False),
+        quiet=getattr(args, "quiet", False),
+    )
+    sys.stdout.write(render_report(outcome.result, outcome.decision, options))
+    sys.stdout.write("\n")
+    return int(outcome.decision.exit_code)
+
+
+def _dispatch_baseline(args: argparse.Namespace) -> int:
+    try:
+        scan_root = resolve_scan_root(args.path)
+    except PathSafetyError as exc:
+        _print_error(f"path error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
+
+    try:
+        config = load_config(scan_root.resolved)
+    except ConfigError as exc:
+        _print_error(f"config error: {exc}")
+        return int(ExitCode.SCAN_ERROR)
+
+    if args.baseline_command == "accept":
+        return _baseline_accept(args, scan_root.resolved, config)
+    if args.baseline_command == "list":
+        return _baseline_list(config)
+    if args.baseline_command == "prune":
+        return _baseline_prune(config)
+    _print_error(f"unknown baseline command: {args.baseline_command}")
+    return int(ExitCode.SCAN_ERROR)
+
+
+def _baseline_accept(
+    args: argparse.Namespace, scan_root: Path, config: ProjectConfig
+) -> int:
+    if is_ci_environment():
+        _print_error(
+            "refusing to write baseline in CI environment (SECSCAN_CI=1). "
+            "Accept findings locally and commit the baseline file instead."
+        )
+        return int(ExitCode.SCAN_ERROR)
+
+    if not args.fingerprint and not args.accept_all:
+        _print_error("must specify --fingerprint <hash> ... or --all")
+        return int(ExitCode.SCAN_ERROR)
+
+    if not args.reason.strip():
+        _print_error("--reason must not be empty")
+        return int(ExitCode.SCAN_ERROR)
+
+    # Re-run scanners on the scan root to discover current fingerprints.
+    scanners = [cls() for cls in ALL_SCANNERS]
+    runner = SubprocessCommandRunner()
+    outcome = run_scanners(
+        scanners,
+        scan_root=resolve_scan_root(str(scan_root)),
+        config=config,
+        runner=runner,
+    )
+
+    candidates = outcome.result.findings
+    if args.accept_all:
+        selected = candidates
+    else:
+        wanted = set(args.fingerprint)
+        selected = tuple(f for f in candidates if f.fingerprint in wanted)
+        unknown = wanted - {f.fingerprint for f in candidates}
+        if unknown:
+            _print_error(
+                "fingerprint(s) not present in current findings: "
+                + ", ".join(sorted(unknown))
+            )
+            return int(ExitCode.SCAN_ERROR)
+
+    if not selected:
+        _print_error("no matching findings to accept")
+        return int(ExitCode.SCAN_ERROR)
+
+    expiry_days = args.expiry_days or config.baseline.default_expiry_days
+    accepted_by = os.environ.get("USER", "")
+    new_entries = tuple(
+        build_entry(
+            f, reason=args.reason, accepted_by=accepted_by, expiry_days=expiry_days
+        )
+        for f in selected
+    )
+
+    existing = load_baseline(config.baseline.path)
+    merged = merge_entries(existing, new_entries, accepted_by=accepted_by)
+    save_baseline(merged, config.baseline.path)
+
+    sys.stdout.write(
+        f"accepted {len(new_entries)} finding(s) into {config.baseline.path}\n"
+    )
+    return int(ExitCode.OK)
+
+
+def _baseline_list(config: ProjectConfig) -> int:
+    baseline = load_baseline(config.baseline.path)
+    if baseline is None or not baseline.entries:
+        sys.stdout.write(f"no baseline at {config.baseline.path}\n")
+        return int(ExitCode.OK)
+    sys.stdout.write(
+        f"baseline {config.baseline.path}: {len(baseline.entries)} entry/entries\n"
+    )
+    for entry in baseline.entries:
+        loc = entry.source_location or "-"
+        sys.stdout.write(
+            f"  {entry.fingerprint[:12]}  {entry.scanner}:{entry.rule_id}  "
+            f"{loc}  expires={entry.expires_at.date().isoformat()}  "
+            f"by={entry.accepted_by or '-'}  reason={entry.reason!r}\n"
+        )
+    return int(ExitCode.OK)
+
+
+def _baseline_prune(config: ProjectConfig) -> int:
+    baseline = load_baseline(config.baseline.path)
+    if baseline is None:
+        sys.stdout.write(f"no baseline at {config.baseline.path}\n")
+        return int(ExitCode.OK)
+    pruned = prune_expired(baseline)
+    removed = len(baseline.entries) - len(pruned.entries)
+    save_baseline(pruned, config.baseline.path)
+    sys.stdout.write(f"pruned {removed} expired entry/entries\n")
+    return int(ExitCode.OK)
+
+
+# --- Helpers ---------------------------------------------------------------
+
+
+def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> ProjectConfig:
+    """Override ProjectConfig with CLI flags. CLI wins over config file."""
+    new = config
+    if getattr(args, "fail_on", None) is not None:
+        new = replace(new, fail_on=Severity.from_name(args.fail_on))
+
+    if getattr(args, "skip", None):
+        skip_set = set(new.skip) | set(args.skip)
+        new = replace(new, skip=tuple(sorted(skip_set)))
+
+    if getattr(args, "semgrep_config", None):
+        new = replace(
+            new,
+            sast=replace(new.sast, semgrep_config=tuple(args.semgrep_config)),
+        )
+
+    if getattr(args, "allow_missing_lockfile", False):
+        new = replace(new, deps=replace(new.deps, allow_missing_lockfile=True))
+
+    if getattr(args, "no_baseline", False):
+        # Easiest way to disable baseline: point it at a path that won't
+        # exist. We do not mutate the file; we just opt out of loading.
+        new = replace(
+            new,
+            baseline=replace(new.baseline, path=Path("/dev/null/secscan-disabled")),
+        )
+
+    return new
+
+
+def _should_use_color(args: argparse.Namespace, stream: object) -> bool:
+    if getattr(args, "no_color", False):
+        return False
+    # Honor NO_COLOR (https://no-color.org).
+    if os.environ.get("NO_COLOR"):
+        return False
+    isatty_fn = getattr(stream, "isatty", None)
+    return bool(callable(isatty_fn) and isatty_fn())
+
+
+def _print_error(message: str) -> None:
+    sys.stderr.write(f"secscan: error: {message}\n")
