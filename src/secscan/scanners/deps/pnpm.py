@@ -49,6 +49,20 @@ PNPM_AUDIT_ARGV: tuple[str, ...] = (
 )
 
 
+def pnpm_audit_argv(*, omit_dev: bool = False) -> tuple[str, ...]:
+    """Construct the pnpm audit invocation.
+
+    pnpm uses ``--prod`` to limit the audit to production deps (the
+    opposite framing of npm's ``--omit=dev``, but the semantic effect is
+    the same in practice). secscan's config key ``ignore_dev_dependencies``
+    maps onto this.
+    """
+    argv = list(PNPM_AUDIT_ARGV)
+    if omit_dev:
+        argv.append("--prod")
+    return tuple(argv)
+
+
 def classify_pnpm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     """Decide whether the pnpm audit run succeeded.
 

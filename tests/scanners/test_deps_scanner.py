@@ -383,3 +383,152 @@ def test_workunit_without_package_manager_is_a_scanner_error(
     outcome = scanner.scan(unit, runner, ScanConfig())
     assert not outcome.succeeded
     assert outcome.error is not None
+
+
+# --- Codex 8th review: pip-audit input-mode dispatch ----------------------
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_pyproject_only_uses_project_mode(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """Codex 8th review: a pyproject-only project must be audited via
+    ``pip-audit <project>``, NOT the interpreter env."""
+    payload = json.dumps({"dependencies": []}).encode()
+    runner.push(returncode=0, stdout=payload)
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="pip",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=None,
+    )
+    scanner.scan(unit, runner, ScanConfig())
+    argv = runner.calls[0][0]
+    assert "--requirement" not in argv
+    # Positional path = scan root.
+    assert str(tmp_path) in argv
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_pylock_toml_uses_requirement_flag(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    pylock = tmp_path / "pylock.toml"
+    pylock.write_text("# pylock")
+    payload = json.dumps({"dependencies": []}).encode()
+    runner.push(returncode=0, stdout=payload)
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="pip",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=pylock,
+    )
+    scanner.scan(unit, runner, ScanConfig())
+    argv = runner.calls[0][0]
+    assert "--requirement" in argv
+    assert str(pylock) in argv
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_uv_lock_is_explicit_scanner_error(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """Codex 8th review: feeding uv.lock to ``pip-audit --requirement`` is
+    a misuse — the file is not a requirements-format text. The dispatcher
+    must surface a scanner error guiding the user to export instead."""
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text("# uv lock")
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="uv",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=uv_lock,
+    )
+    outcome = scanner.scan(unit, runner, ScanConfig())
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "uv export" in outcome.error.reason
+    # Must NOT have executed pip-audit at all.
+    assert runner.calls == []
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_pdm_lock_is_explicit_scanner_error(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    pdm_lock = tmp_path / "pdm.lock"
+    pdm_lock.write_text("# pdm lock")
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="pypi",
+        package_manager="pdm",
+        manifest=tmp_path / "pyproject.toml",
+        lockfile=pdm_lock,
+    )
+    outcome = scanner.scan(unit, runner, ScanConfig())
+    assert not outcome.succeeded
+    assert outcome.error is not None
+    assert "pdm export" in outcome.error.reason
+
+
+# --- Codex 8th review: ignore_dev_dependencies + allow-missing-lockfile --
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_npm_allow_missing_lockfile_adds_no_package_lock_flag(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    """npm needs ``--no-package-lock`` to audit a package.json without a
+    lockfile. The previous Phase 1B passed --allow-missing-lockfile via
+    config but never translated it to argv."""
+    payload = json.dumps({"vulnerabilities": {}, "metadata": {}}).encode()
+    runner.push(returncode=0, stdout=payload)
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="npm",
+        package_manager="npm",
+        lockfile=None,
+    )
+    cfg = ScanConfig(extra=MappingProxyType({"allow_missing_lockfile": True}))
+    scanner.scan(unit, runner, cfg)
+    argv = runner.calls[0][0]
+    assert "--no-package-lock" in argv
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_npm_ignore_dev_dependencies_adds_omit_dev(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    payload = json.dumps({"vulnerabilities": {}, "metadata": {}}).encode()
+    runner.push(returncode=0, stdout=payload)
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="npm",
+        package_manager="npm",
+        lockfile=tmp_path / "package-lock.json",
+    )
+    cfg = ScanConfig(extra=MappingProxyType({"ignore_dev_dependencies": True}))
+    scanner.scan(unit, runner, cfg)
+    argv = runner.calls[0][0]
+    assert "--omit=dev" in argv
+
+
+@pytest.mark.usefixtures("stub_npm")
+def test_pnpm_ignore_dev_dependencies_adds_prod_flag(
+    scanner: DepsScanner, runner: FakeRunner, tmp_path: Path
+) -> None:
+    payload = json.dumps({"advisories": {}, "metadata": {}}).encode()
+    runner.push(returncode=0, stdout=payload)
+    unit = WorkUnit(
+        root=tmp_path,
+        ecosystem="npm",
+        package_manager="pnpm",
+        lockfile=tmp_path / "pnpm-lock.yaml",
+    )
+    cfg = ScanConfig(extra=MappingProxyType({"ignore_dev_dependencies": True}))
+    scanner.scan(unit, runner, cfg)
+    argv = runner.calls[0][0]
+    assert "--prod" in argv

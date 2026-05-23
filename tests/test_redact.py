@@ -74,6 +74,45 @@ def test_redact_text_scrubs_bearer_header_value() -> None:
     assert "Authorization" in out
 
 
+def test_redact_text_scrubs_npm_authtoken_in_config_line() -> None:
+    # Codex 8th review: .npmrc-style "key=value" pairs must redact the
+    # value but keep the key name for context.
+    text = "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+    out = redact_text(text)
+    assert "npm_abcdefghijklmnopqrstuvwxyz" not in out
+    assert "_authToken" in out
+
+
+def test_redact_text_scrubs_npm_token_prefixed() -> None:
+    text = "leaked npm_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890ABCD trailing"
+    out = redact_text(text)
+    assert "npm_aBcDeFgHiJk" not in out
+
+
+def test_redact_text_scrubs_pypi_token() -> None:
+    text = "found pypi-AgEIcHlwaS5vcmcCJDk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5 in env"
+    out = redact_text(text)
+    assert "pypi-AgEI" not in out
+
+
+def test_redact_text_scrubs_url_basic_auth() -> None:
+    """URL-embedded credentials are a common leak path in pip/npm stderr
+    output. The redactor preserves scheme + host so the operator can see
+    WHICH registry was failing, but drops the user:pass."""
+    text = "Fetching https://alice:p4ssw0rd@registry.example.com/pkg failed"
+    out = redact_text(text)
+    assert "alice:p4ssw0rd" not in out
+    # Host and scheme are still useful for debugging.
+    assert "registry.example.com" in out
+    assert "https://" in out
+
+
+def test_redact_text_scrubs_pip_index_url_config_line() -> None:
+    text = "index-url=https://user:secret@private.pypi.org/simple/"
+    out = redact_text(text)
+    assert "user:secret" not in out
+
+
 def test_redact_text_scrubs_jwt() -> None:
     # Realistically-sized JWT: header.payload.signature, each segment well
     # above the {8,} minimum the redactor requires.

@@ -30,19 +30,20 @@ from ..redact import redact_text, truncate
 from ..runner import CommandResult, CommandRunner, decode_output
 from .base import Scanner, ToolNotFoundError
 from .deps.npm import (
-    NPM_AUDIT_ARGV,
     build_findings_from_npm_audit,
     classify_npm_audit_exit,
+    npm_audit_argv,
 )
 from .deps.pip_audit import (
     build_findings_from_pip_audit,
     classify_pip_audit_exit,
-    pip_audit_argv,
+    pip_audit_argv_for_project,
+    pip_audit_argv_for_requirements,
 )
 from .deps.pnpm import (
-    PNPM_AUDIT_ARGV,
     build_findings_from_pnpm_audit,
     classify_pnpm_audit_exit,
+    pnpm_audit_argv,
 )
 
 _Classifier = Callable[[CommandResult], tuple[bool, str | None]]
@@ -81,13 +82,17 @@ class DepsScanner(Scanner):
             )
 
         allow_missing = bool(config.extra.get("allow_missing_lockfile", False))
+        omit_dev = bool(config.extra.get("ignore_dev_dependencies", False))
 
         if package_manager == "npm":
             return self._run_npm_like(
                 unit=unit,
                 runner=runner,
                 config=config,
-                argv=NPM_AUDIT_ARGV,
+                argv=npm_audit_argv(
+                    allow_missing_lockfile=allow_missing,
+                    omit_dev=omit_dev,
+                ),
                 tool="npm",
                 allow_missing_lockfile=allow_missing,
                 classifier=classify_npm_audit_exit,
@@ -98,7 +103,7 @@ class DepsScanner(Scanner):
                 unit=unit,
                 runner=runner,
                 config=config,
-                argv=PNPM_AUDIT_ARGV,
+                argv=pnpm_audit_argv(omit_dev=omit_dev),
                 tool="pnpm",
                 allow_missing_lockfile=allow_missing,
                 classifier=classify_pnpm_audit_exit,
@@ -179,17 +184,10 @@ class DepsScanner(Scanner):
                 "`pip install 'secscan[deps]'`) and ensure it is on PATH",
             )
 
-        requirements_arg: str | None = None
-        if unit.lockfile is not None:
-            requirements_arg = str(unit.lockfile)
-        elif unit.manifest is not None and unit.manifest.name.endswith(".txt"):
-            requirements_arg = str(unit.manifest)
-        # pyproject-only projects (no lockfile, no requirements.txt) fall
-        # through with requirements_arg=None — pip-audit will use the
-        # active environment + --strict to surface dependency-resolution
-        # failures rather than silently miss them.
+        argv = self._select_pip_audit_argv(unit)
+        if isinstance(argv, ScanOutcome):
+            return argv  # An error result returned for unsupported input.
 
-        argv = pip_audit_argv(lockfile_or_requirements=requirements_arg)
         result = runner.run(
             argv,
             cwd=unit.root,
@@ -210,6 +208,52 @@ class DepsScanner(Scanner):
             tool_version=None,
             duration_seconds=result.duration_seconds,
         )
+
+    def _select_pip_audit_argv(
+        self, unit: WorkUnit
+    ) -> tuple[str, ...] | ScanOutcome:
+        """Pick the right pip-audit invocation for this WorkUnit.
+
+        Modes (Codex 8th review):
+        - requirements.txt / pylock.toml  →  ``-r <file>``
+        - pyproject.toml + no lock         →  ``<project-path>``
+                                              (audits the project, NOT the
+                                              current Python env — see
+                                              pip_audit.py docstring).
+        - uv.lock / pdm.lock               →  ScanError: pip-audit cannot
+                                              consume these directly; the
+                                              user must export to
+                                              requirements.txt first.
+        - setup.py only                    →  project-path mode.
+        """
+        # Lockfile dictates the mode when present.
+        if unit.lockfile is not None:
+            lock_name = unit.lockfile.name
+            if lock_name == "pylock.toml" or lock_name.endswith(".txt"):
+                return pip_audit_argv_for_requirements(str(unit.lockfile))
+            if lock_name in ("uv.lock", "pdm.lock"):
+                return _make_error(
+                    f"pip-audit does not consume {lock_name} directly. "
+                    f"Export to requirements.txt first "
+                    f"(`uv export -o requirements.txt` or "
+                    f"`pdm export -o requirements.txt`) and re-run.",
+                    returncode=None,
+                )
+            # Unknown lockfile name: be conservative — error out rather
+            # than guess.
+            return _make_error(
+                f"unrecognized Python lockfile: {lock_name}. "
+                f"Supported: pylock.toml, requirements*.txt.",
+                returncode=None,
+            )
+
+        # No lockfile. requirements.txt-style manifests also live under
+        # ``manifest`` in this branch (set by discovery._detect_pypi).
+        if unit.manifest is not None and unit.manifest.name.endswith(".txt"):
+            return pip_audit_argv_for_requirements(str(unit.manifest))
+
+        # pyproject-only / setup.py-only → project-path mode.
+        return pip_audit_argv_for_project(str(unit.root))
 
 
 # --- Helpers ---------------------------------------------------------------

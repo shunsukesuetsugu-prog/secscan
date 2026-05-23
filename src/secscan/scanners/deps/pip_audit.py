@@ -47,17 +47,36 @@ from ...runner import CommandResult, decode_output
 from ._common import AdvisoryHints, deps_fingerprint
 
 
-def pip_audit_argv(*, lockfile_or_requirements: str | None) -> tuple[str, ...]:
-    """Construct the pip-audit invocation.
+class PipAuditInputMode:
+    """Input modes pip-audit supports. The dispatcher in deps_scanner.py
+    selects a mode from the WorkUnit and we build argv accordingly.
 
-    When a lockfile / requirements file is available we point at it; for
-    pyproject-only projects pip-audit can discover the environment from
-    ``--project`` when invoked from the project root.
+    These are exposed as classvar-like constants (not an enum) to keep the
+    deps_scanner module's branching shallow.
     """
-    base = ("pip-audit", "--format", "json", "--strict")
-    if lockfile_or_requirements is not None:
-        return (*base, "--requirement", lockfile_or_requirements)
-    return base
+
+    REQUIREMENTS = "requirements"
+    """``-r <file>`` mode. The file is a requirements.txt or pylock.toml."""
+
+    PROJECT = "project"
+    """``<project-path>`` mode. Lets pip-audit walk the project's
+    pyproject + lockfiles. Phase 1B uses this for pyproject-only projects
+    so we audit the project, NOT the current Python environment."""
+
+
+def pip_audit_argv_for_requirements(path: str) -> tuple[str, ...]:
+    """argv for the ``-r <file>`` form (requirements.txt or pylock.toml)."""
+    return ("pip-audit", "--format", "json", "--strict", "--requirement", path)
+
+
+def pip_audit_argv_for_project(path: str) -> tuple[str, ...]:
+    """argv for the project-path form.
+
+    pip-audit accepts a positional path to a pyproject-bearing directory
+    and audits the project's dependencies — NOT the current interpreter's
+    environment, which was the bug Codex 8th review flagged.
+    """
+    return ("pip-audit", "--format", "json", "--strict", path)
 
 
 def classify_pip_audit_exit(result: CommandResult) -> tuple[bool, str | None]:

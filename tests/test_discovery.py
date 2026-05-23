@@ -172,6 +172,52 @@ def test_nested_manifests_ignore_node_modules(tmp_path: Path) -> None:
     assert all("node_modules" not in w for w in discovery.warnings)
 
 
+def test_top_level_manifest_symlink_is_ignored(tmp_path: Path) -> None:
+    """Codex 8th review: a symlinked manifest at the scan root could point
+    outside the root, letting the package manager read out-of-tree files.
+    Discovery must reject symlinked manifests outright."""
+    # Create the real file outside the scan root and symlink to it.
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    real_pkg_json = outside_root / "package.json"
+    real_pkg_json.write_text("{}")
+
+    scan_root_dir = tmp_path / "project"
+    scan_root_dir.mkdir()
+    link = scan_root_dir / "package.json"
+    try:
+        link.symlink_to(real_pkg_json)
+    except OSError:
+        pytest.skip("symlinks not supported on this platform")
+    root = resolve_scan_root(scan_root_dir)
+    discovery = discover_for_scanner("deps", root)
+    # No WorkUnit emitted; user sees a "no manifest" warning instead.
+    assert not [w for w in discovery.work_units if w.ecosystem == "npm"]
+
+
+def test_top_level_lockfile_symlink_is_ignored(tmp_path: Path) -> None:
+    scan_root_dir = tmp_path / "project"
+    scan_root_dir.mkdir()
+    (scan_root_dir / "package.json").write_text("{}")
+    # Real lockfile lives outside the scan root.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    real_lock = outside / "package-lock.json"
+    real_lock.write_text("{}")
+    link = scan_root_dir / "package-lock.json"
+    try:
+        link.symlink_to(real_lock)
+    except OSError:
+        pytest.skip("symlinks not supported on this platform")
+    root = resolve_scan_root(scan_root_dir)
+    (npm,) = [
+        w for w in discover_for_scanner("deps", root).work_units if w.ecosystem == "npm"
+    ]
+    # Lockfile must be None — the symlink was rejected. The Scanner will
+    # then either error out (default) or proceed with --no-package-lock.
+    assert npm.lockfile is None
+
+
 def test_nested_manifests_skip_symlinks(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text("{}")
     target = tmp_path / "elsewhere"

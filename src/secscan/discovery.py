@@ -81,9 +81,26 @@ def _discover_deps(root: ResolvedRoot) -> Discovery:
 # --- Per-ecosystem detection ----------------------------------------------
 
 
+def _is_real_file(path: Path) -> bool:
+    """``True`` only if ``path`` is a regular file that is NOT a symlink.
+
+    Codex 8th review flagged that ``Path.is_file()`` silently follows
+    symlinks, so a manifest/lockfile under the scan root could point to a
+    file outside the root. We refuse symlinked manifests outright: a
+    package manager reading them would read out-of-tree content, and a
+    legitimate project rarely needs its lockfile to be a symlink.
+    """
+    try:
+        if path.is_symlink():
+            return False
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _detect_npm(root: Path) -> WorkUnit | None:
     manifest = root / "package.json"
-    if not manifest.is_file():
+    if not _is_real_file(manifest):
         return None
     # Lockfile preference order matches what npm/pnpm themselves prefer:
     # pnpm > npm package-lock > shrinkwrap. We don't currently scan yarn.lock
@@ -97,7 +114,7 @@ def _detect_npm(root: Path) -> WorkUnit | None:
     }
     for lockname, pm in lockfile_to_pm.items():
         candidate = root / lockname
-        if candidate.is_file():
+        if _is_real_file(candidate):
             return WorkUnit(
                 root=root,
                 ecosystem="npm",
@@ -123,10 +140,10 @@ def _detect_pypi(root: Path) -> WorkUnit | None:
     # requirements-dev.txt). We pick the canonical one for the manifest hint
     # and let the scanner enumerate the rest.
     req_main = root / "requirements.txt"
-    has_any = pyproject.is_file() or setup_py.is_file() or req_main.is_file()
+    has_any = _is_real_file(pyproject) or _is_real_file(setup_py) or _is_real_file(req_main)
     # Even with a non-canonical requirements file (e.g. requirements-dev.txt),
     # the top-level check should still surface it.
-    if not has_any and any(p.is_file() for p in root.glob("requirements*.txt")):
+    if not has_any and any(_is_real_file(p) for p in root.glob("requirements*.txt")):
         has_any = True
     if not has_any:
         return None
@@ -134,7 +151,7 @@ def _detect_pypi(root: Path) -> WorkUnit | None:
     manifest: Path | None
     lockfile: Path | None
     package_manager: str
-    if pyproject.is_file():
+    if _is_real_file(pyproject):
         manifest = pyproject
         # uv/pdm style locks. The package_manager hint matches the lockfile
         # producer so the adapter can decide whether `pip-audit --project`
@@ -144,21 +161,24 @@ def _detect_pypi(root: Path) -> WorkUnit | None:
         package_manager = "pip"  # pyproject without lock → fall back to pip
         for lockname, pm in pm_by_lock.items():
             candidate = root / lockname
-            if candidate.is_file():
+            if _is_real_file(candidate):
                 lockfile = candidate
                 package_manager = pm
                 break
-    elif req_main.is_file():
+    elif _is_real_file(req_main):
         manifest = req_main
         lockfile = req_main  # requirements.txt itself doubles as a lock-ish file
         package_manager = "pip-requirements"
-    elif setup_py.is_file():
+    elif _is_real_file(setup_py):
         manifest = setup_py
         lockfile = None
         package_manager = "pip"
     else:
         # requirements*.txt only (no requirements.txt by canonical name)
-        manifest = next(iter(sorted(root.glob("requirements*.txt"))), None)
+        manifest = next(
+            iter(sorted(p for p in root.glob("requirements*.txt") if _is_real_file(p))),
+            None,
+        )
         lockfile = manifest
         package_manager = "pip-requirements"
 

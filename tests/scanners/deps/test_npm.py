@@ -76,6 +76,20 @@ def test_classify_rejects_unexpected_object() -> None:
     assert not ok
 
 
+def test_classify_rejects_npm_v6_shape() -> None:
+    """Codex 8th review: npm v6's top-level ``advisories`` map has a
+    different schema we don't parse. The classifier must REJECT this
+    shape rather than accept it and let the builder return zero
+    findings (a silent false-clean for v6 users)."""
+    v6_payload = json.dumps(
+        {"advisories": {"1234": {"id": 1234, "title": "old shape"}}}
+    ).encode()
+    ok, err = classify_npm_audit_exit(_result(returncode=1, stdout=v6_payload))
+    assert not ok
+    assert err is not None
+    assert "v6" in err or "v7+" in err
+
+
 def test_classify_marks_timeout() -> None:
     ok, err = classify_npm_audit_exit(_result(timed_out=True))
     assert not ok
@@ -131,9 +145,37 @@ def test_parses_one_finding_per_advisory_object() -> None:
     assert f.location.package == "lodash"
     assert f.location.ecosystem == "npm"
     assert f.cve == "CVE-2024-9999"
+    # The sample uses ``"cwe": ["CWE-1321"]`` (list form); the adapter
+    # must extract the first string element. Codex 8th review flagged
+    # the previous implementation that only handled the string form.
+    assert f.cwe == "CWE-1321"
     assert f.fix_version == "4.17.21"
     assert f.references and f.references[0].startswith("https://")
     assert "Prototype Pollution" in f.title
+
+
+def test_advisory_cwe_as_string_also_supported() -> None:
+    payload = json.dumps(
+        {
+            "vulnerabilities": {
+                "pkg": {
+                    "name": "pkg",
+                    "severity": "high",
+                    "via": [
+                        {
+                            "url": "https://github.com/advisories/GHSA-AAA",
+                            "title": "t",
+                            "severity": "high",
+                            "cwe": "CWE-79",
+                        }
+                    ],
+                    "fixAvailable": False,
+                }
+            }
+        }
+    ).encode()
+    (f,) = build_findings_from_npm_audit(payload)
+    assert f.cwe == "CWE-79"
 
 
 def test_meta_vulnerabilities_are_elided() -> None:

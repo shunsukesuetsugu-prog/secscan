@@ -9,7 +9,8 @@ from secscan.runner import CommandResult
 from secscan.scanners.deps.pip_audit import (
     build_findings_from_pip_audit,
     classify_pip_audit_exit,
-    pip_audit_argv,
+    pip_audit_argv_for_project,
+    pip_audit_argv_for_requirements,
 )
 
 
@@ -34,7 +35,7 @@ def _result(
 
 
 def test_argv_for_requirements_file() -> None:
-    argv = pip_audit_argv(lockfile_or_requirements="reqs.txt")
+    argv = pip_audit_argv_for_requirements("reqs.txt")
     assert "pip-audit" in argv
     assert "--format" in argv and "json" in argv
     # --strict makes pip-audit fail on dependency-resolution problems
@@ -44,9 +45,14 @@ def test_argv_for_requirements_file() -> None:
     assert "reqs.txt" in argv
 
 
-def test_argv_without_lockfile_omits_requirement_flag() -> None:
-    argv = pip_audit_argv(lockfile_or_requirements=None)
+def test_argv_for_project_audits_the_project_not_the_environment() -> None:
+    """Codex 8th review: the previous version of this adapter would fall
+    through to ``pip-audit --format json --strict`` with NO positional
+    path, which audits the current Python interpreter instead of the
+    target project. The project-mode argv MUST include a positional path."""
+    argv = pip_audit_argv_for_project("/some/project")
     assert "--requirement" not in argv
+    assert "/some/project" in argv
 
 
 # --- classify_pip_audit_exit ---------------------------------------------

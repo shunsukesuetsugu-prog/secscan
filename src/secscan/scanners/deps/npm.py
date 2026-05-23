@@ -47,6 +47,28 @@ NPM_AUDIT_ARGV: tuple[str, ...] = (
 )
 
 
+def npm_audit_argv(
+    *,
+    allow_missing_lockfile: bool = False,
+    omit_dev: bool = False,
+) -> tuple[str, ...]:
+    """Construct the npm audit invocation.
+
+    - ``allow_missing_lockfile``: appends ``--no-package-lock`` so npm
+      audits the package.json's stated dependencies without requiring a
+      package-lock.json on disk. Codex 8th review flagged that the
+      ``--allow-missing-lockfile`` CLI flag previously had no actual effect.
+    - ``omit_dev``: appends ``--omit=dev`` to skip devDependencies from
+      the audit, matching the config's ``ignore_dev_dependencies`` key.
+    """
+    argv = list(NPM_AUDIT_ARGV)
+    if allow_missing_lockfile:
+        argv.append("--no-package-lock")
+    if omit_dev:
+        argv.append("--omit=dev")
+    return tuple(argv)
+
+
 def classify_npm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
     """Decide whether the npm audit run succeeded.
 
@@ -67,9 +89,17 @@ def classify_npm_audit_exit(result: CommandResult) -> tuple[bool, str | None]:
         return False, f"npm audit JSON was malformed: {exc}"
     if not isinstance(data, dict):
         return False, "npm audit JSON top-level was not an object"
-    # Look for at least one structural marker so we don't accidentally
-    # accept an error envelope as a valid report.
-    if not any(key in data for key in ("vulnerabilities", "metadata", "advisories")):
+    # We only support npm v7+ output (the ``vulnerabilities`` shape). npm
+    # v6 used a top-level ``advisories`` map with a different schema and we
+    # do not parse it — accepting it here would silently produce zero
+    # findings for v6 users.
+    if "vulnerabilities" not in data and "metadata" not in data:
+        if "advisories" in data:
+            return False, (
+                "npm audit output appears to be from npm v6 (top-level "
+                "'advisories'). secscan supports npm v7+ only — please "
+                "upgrade your Node.js / npm version."
+            )
         return False, "npm audit JSON did not contain expected report fields"
     return True, None
 
@@ -151,7 +181,13 @@ def _hints_from_advisory(
     if not advisory_id:
         return None
     cve = _first_str(advisory.get("cve")) or _extract_cve_from_url(advisory.get("url"))
-    cwe = _first_str(advisory.get("cwe"))
+    # npm advisories report ``cwe`` as either a string or a list; accept both.
+    cwe_raw = advisory.get("cwe")
+    cwe: str | None
+    if isinstance(cwe_raw, list):
+        cwe = next((c for c in cwe_raw if isinstance(c, str) and c), None)
+    else:
+        cwe = _first_str(cwe_raw)
     title = _first_str(advisory.get("title")) or advisory_id
     message = _first_str(advisory.get("title")) or ""
     severity = severity_from_npm_label(advisory.get("severity"))

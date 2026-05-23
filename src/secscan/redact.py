@@ -47,10 +47,34 @@ _CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), REDACTED),
     # Slack bot/user/app tokens
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"), REDACTED),
+    # npm registry tokens (uuid-shaped and "npm_..." prefixed)
+    (re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"), REDACTED),
+    # PyPI tokens
+    (re.compile(r"\bpypi-[A-Za-z0-9_\-]{30,}\b"), REDACTED),
+    # .npmrc / pip.conf style "key=token" lines: preserve the key, redact value.
+    # We only target known-name keys to avoid stripping benign config.
+    (
+        re.compile(
+            r"(?i)(_authToken\s*=\s*|"
+            r"_password\s*=\s*|"
+            r"_auth\s*=\s*|"
+            r"NPM_TOKEN\s*=\s*|"
+            r"PIP_INDEX_URL\s*=\s*|"
+            r"index-url\s*=\s*)"
+            r"\S+"
+        ),
+        r"\1" + REDACTED,
+    ),
     # Generic Bearer header values: preserve the header name, redact the value.
     (
         re.compile(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"),
         r"\1" + REDACTED,
+    ),
+    # URL with basic-auth user:pass — keep the scheme + host, drop creds.
+    # Example:  https://user:pass@host/path  →  https://[REDACTED]@host/path
+    (
+        re.compile(r"\b(https?://)[^/\s:@]+:[^/\s@]+@"),
+        r"\1" + REDACTED + "@",
     ),
     # JWT (three base64url segments joined by dots).
     (
