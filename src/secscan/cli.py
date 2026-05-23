@@ -221,13 +221,15 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
     # For ``secscan all``, the user expects "every kind of check we know
     # about" — secrets + deps + sast. If any of those is NOT registered,
     # warn (and skip-list it) instead of silently running a subset and
-    # exiting 0. We pass these as ``skipped`` warnings to the orchestrator
-    # via a synthetic config; the orchestrator already reports skipped
-    # scanners in the output, so this surfaces the gap to the user.
+    # exiting 0. Explicitly skipped scanners (--skip / config.skip) do NOT
+    # count as "missing" — the user already acknowledged that gap.
     expected_all_scanners = {"secrets", "deps", "sast"}
     missing_for_all: tuple[str, ...] = ()
     if args.command == "all":
-        missing_for_all = tuple(sorted(expected_all_scanners - _REGISTERED_NAMES))
+        user_skipped = set(config.skip) | set(getattr(args, "skip", ()) or ())
+        missing_for_all = tuple(
+            sorted(expected_all_scanners - _REGISTERED_NAMES - user_skipped)
+        )
 
     scanners = [cls() for cls in ALL_SCANNERS]
 

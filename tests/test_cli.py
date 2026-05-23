@@ -189,6 +189,27 @@ def test_all_warns_and_fails_when_deps_or_sast_missing(
     assert "sast" in out
 
 
+def test_all_with_explicit_skip_does_not_treat_skipped_as_missing(
+    project: Path,
+    stub_gitleaks_installed: None,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # User explicitly opts out of deps/sast — that's an acknowledged gap,
+    # not an "implementation missing" gap. Result should be a clean OK
+    # (assuming secrets finds nothing).
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"")
+    rc = cli.main(
+        ["all", "--path", str(project), "--skip", "deps", "--skip", "sast"]
+    )
+    out = capsys.readouterr().out
+    assert rc == int(ExitCode.OK)
+    # The warning about implementation gaps should NOT appear when the
+    # gap is acknowledged via --skip.
+    assert "partial scan" not in out
+
+
 def test_quiet_emits_single_line(
     project: Path,
     stub_gitleaks_installed: None,
