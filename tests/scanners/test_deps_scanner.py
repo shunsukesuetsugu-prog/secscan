@@ -368,7 +368,7 @@ def test_unknown_package_manager_is_a_scanner_error(
     unit = WorkUnit(
         root=tmp_path,
         ecosystem="npm",
-        package_manager="yarn",  # Phase 1B doesn't ship a yarn adapter
+        package_manager="bundler",  # we don't ship a bundler adapter
     )
     outcome = scanner.scan(unit, runner, ScanConfig())
     assert not outcome.succeeded

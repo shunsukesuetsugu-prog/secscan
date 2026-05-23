@@ -256,14 +256,15 @@ def test_workspace_members_excluded_from_nested_manifest_warning(
     )
 
 
-def test_yarn_unsupported_blocks_npm_workspace_processing(
+def test_yarn_classic_unsupported_blocks_npm_workspace_processing(
     tmp_path: Path,
 ) -> None:
-    """Codex 21st review: a yarn-only repo with package.json#workspaces
-    must NOT then be processed as an npm workspace. Otherwise we'd run
-    ``npm audit --workspace <id>`` on a project that lacks the npm
-    lockfile, producing a confusing error."""
-    (tmp_path / "yarn.lock").write_text("# yarn lock\n")
+    """Codex 21st review (updated for Phase 2-C-2): a Yarn v1 (Classic)
+    repo with package.json#workspaces must NOT then be processed as an
+    npm workspace — different lockfile, different audit semantics.
+    Yarn Berry IS processed (see other tests); only Classic is blocked
+    here."""
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
     (tmp_path / "package.json").write_text(
         '{"name": "root", "workspaces": ["packages/*"]}'
     )
@@ -272,14 +273,36 @@ def test_yarn_unsupported_blocks_npm_workspace_processing(
     (pkg / "package.json").write_text('{"name": "@org/api"}')
     root = resolve_scan_root(tmp_path)
     discovery = discover_for_scanner("deps", root)
-    # No workspace_id-bearing units (npm workspace expansion was skipped).
+    # No workspace_id-bearing units: npm workspace expansion is skipped
+    # because yarn Classic is unsupported.
     assert all(
         w.workspace_id is None
         for w in discovery.work_units
         if w.ecosystem == "npm"
     )
-    # The unsupported warning is surfaced.
-    assert any("yarn workspaces" in w for w in discovery.warnings)
+    assert any("Yarn v1 (Classic)" in w for w in discovery.warnings)
+
+
+def test_yarn_berry_workspace_produces_units(tmp_path: Path) -> None:
+    """Phase 2-C-2: a Yarn Berry repo with workspaces emits one unit per
+    workspace member (package_manager="yarn"). Audit ran from the repo
+    root via the ``yarn workspace <name>`` selector."""
+    (tmp_path / "yarn.lock").write_text("__metadata:\n  version: 6\n")
+    (tmp_path / "package.json").write_text(
+        '{"name": "root-app", "packageManager": "yarn@3.6.4", '
+        '"workspaces": ["packages/*"]}'
+    )
+    api = tmp_path / "packages" / "api"
+    api.mkdir(parents=True)
+    (api / "package.json").write_text('{"name": "@org/api"}')
+    root = resolve_scan_root(tmp_path)
+    discovery = discover_for_scanner("deps", root)
+    npm_units = [w for w in discovery.work_units if w.ecosystem == "npm"]
+    workspace_ids = {u.workspace_id for u in npm_units}
+    # root + api both included; package_manager pinned to "yarn".
+    assert "@org/api" in workspace_ids
+    assert "root-app" in workspace_ids
+    assert all(u.package_manager == "yarn" for u in npm_units)
 
 
 def test_nested_manifests_skip_symlinks(tmp_path: Path) -> None:

@@ -48,6 +48,11 @@ from .deps.pnpm import (
     classify_pnpm_audit_exit,
     pnpm_audit_argv,
 )
+from .deps.yarn import (
+    build_findings_from_yarn_audit,
+    classify_yarn_audit_exit,
+    yarn_audit_argv,
+)
 
 _Classifier = Callable[[CommandResult], tuple[bool, str | None]]
 _Builder = Callable[[bytes], tuple[Finding, ...]]
@@ -117,6 +122,25 @@ class DepsScanner(Scanner):
                 classifier=classify_pnpm_audit_exit,
                 builder=lambda stdout: build_findings_from_pnpm_audit(
                     stdout, workspace_id=unit.workspace_id
+                ),
+            )
+        if package_manager == "yarn":
+            if unit.workspace_id is None:
+                return _make_error(
+                    "yarn deps audit requires a workspace selector but the "
+                    "WorkUnit had none; this is an internal discovery bug.",
+                    returncode=None,
+                )
+            return self._run_npm_like(
+                unit=unit,
+                runner=runner,
+                config=config,
+                argv=yarn_audit_argv(workspace_id=unit.workspace_id),
+                tool="yarn",
+                allow_missing_lockfile=False,  # yarn.lock is required for audit
+                classifier=classify_yarn_audit_exit,
+                builder=lambda stdout: build_findings_from_yarn_audit(
+                    stdout, workspace_id=unit.workspace_id or ""
                 ),
             )
         if package_manager in {"pip", "uv", "pdm", "pip-requirements"}:

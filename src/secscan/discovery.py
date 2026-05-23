@@ -151,6 +151,7 @@ def _check_workspaces(
         detect_pnpm_workspace,
         detect_uv_workspace,
         detect_yarn_unsupported,
+        detect_yarn_workspace,
     )
 
     units: list[WorkUnit] = []
@@ -166,7 +167,24 @@ def _check_workspaces(
     # "unsupported" condition specifically; the drift-warning case (yarn
     # lockfile coexists with an npm/pnpm lockfile) is benign because
     # those scanners handle it correctly.
-    yarn_blocks_npm = any("yarn workspaces" in w for w in yarn_warnings)
+    # The current Phase 2-C-2 messages we look for are "Yarn v1 (Classic)"
+    # (Classic detected; not handled) and "Yarn major version could not
+    # be determined" (unknown). For Yarn Berry we DO process the project
+    # via ``detect_yarn_workspace`` below.
+    yarn_blocks_npm = any(
+        "Yarn v1 (Classic)" in w or "could not be determined" in w
+        for w in yarn_warnings
+    )
+
+    # Phase 2-C-2: Yarn Berry workspace expansion takes precedence over
+    # the npm path so a Berry repo doesn't accidentally drop into npm
+    # workspace processing.
+    yarn_ws = detect_yarn_workspace(root)
+    if yarn_ws is not None:
+        units.extend(yarn_ws.units)
+        warnings.extend(yarn_ws.warnings)
+        if yarn_ws.units:
+            npm_handled = True  # Block both npm-workspaces and root npm path.
 
     pnpm = detect_pnpm_workspace(root)
     if pnpm is not None:

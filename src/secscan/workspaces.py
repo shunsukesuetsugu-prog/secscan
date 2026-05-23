@@ -380,12 +380,14 @@ def _build_uv_units(
 
 
 def detect_yarn_unsupported(root: ResolvedRoot) -> tuple[str, ...]:
-    """If yarn.lock + package.json workspaces co-exist, emit a warning.
+    """Warn about Yarn states secscan does not handle natively.
 
-    Yarn workspaces are NOT supported in Phase 2-B. Without this guard,
-    the npm-workspaces detection above would happily walk the patterns
-    and the npm adapter would then try ``npm audit`` against a yarn-only
-    project, producing a confusing error.
+    Phase 2-C-2 added Yarn Berry support via ``detect_yarn_workspace``;
+    this function still produces a drift warning when yarn.lock coexists
+    with an npm/pnpm lockfile (a common monorepo refactor leftover) and a
+    Classic-only warning when a yarn.lock is detected as the Yarn 1
+    format (we don't run ``yarn audit`` on Classic — different JSON, no
+    member-scoped audit story).
     """
     yarn_lock = root.resolved / "yarn.lock"
     pkg_json = root.resolved / "package.json"
@@ -394,20 +396,259 @@ def detect_yarn_unsupported(root: ResolvedRoot) -> tuple[str, ...]:
     npm_lock = root.resolved / "package-lock.json"
     pnpm_lock = root.resolved / "pnpm-lock.yaml"
     if _is_real_file(npm_lock) or _is_real_file(pnpm_lock):
-        # Mixed setup: npm/pnpm lockfile is present alongside yarn.lock.
-        # The npm/pnpm adapter will pick the right lockfile, but the user
-        # likely has stale yarn.lock — warn but don't block.
         return (
             "yarn.lock coexists with another lockfile; secscan will use the "
             "non-yarn lockfile. Remove yarn.lock to avoid drift.",
         )
-    raw = _read_json(pkg_json)
-    if isinstance(raw, dict) and "workspaces" in raw:
+    # Pure yarn project: figure out the major version so we can either
+    # let Berry detection run downstream or emit a Classic-specific
+    # message here. Classic is currently unsupported.
+    version = _detect_yarn_major(root)
+    if version == 1:
         return (
-            "yarn workspaces detected but not supported in this release; "
-            "secscan supports npm and pnpm workspaces.",
+            "Yarn v1 (Classic) workspace detected but not supported in this "
+            "release; consider upgrading to Yarn Berry (v2+) or migrating to "
+            "npm/pnpm. Classic audit semantics differ enough that we don't "
+            "ship an adapter for it.",
         )
+    if version is None:
+        return (
+            "yarn.lock detected but the Yarn major version could not be "
+            "determined (no `packageManager` field, no `.yarnrc.yml`, and "
+            "yarn.lock format was ambiguous). secscan will NOT run a yarn "
+            "audit. Set `packageManager: yarn@<version>` in package.json to "
+            "enable per-version handling.",
+        )
+    # Berry will be picked up by ``detect_yarn_workspace`` below.
     return ()
+
+
+def detect_yarn_workspace(root: ResolvedRoot) -> WorkspaceExpansion | None:
+    """Detect a Yarn Berry (v2+) workspace and emit one unit per member.
+
+    Yarn Berry's CLI is ``yarn workspace <name> npm audit --json --recursive``
+    for per-member audits; the runner argv is built in ``scanners/deps/yarn.py``.
+    Yarn Classic (v1) uses a different audit shape and is rejected here
+    via ``detect_yarn_unsupported``.
+
+    Phase 2-C-2 / Codex 28th review:
+    - Version detection consults ``packageManager`` (Corepack convention)
+      then the yarn.lock format then ``.yarnrc.yml``; we never invoke
+      ``yarn --version`` during discovery.
+    - We DO read ``package.json#workspaces`` (or
+      ``pnpm-workspace.yaml``-style separate config — Yarn Berry uses the
+      ``workspaces`` field) for member globs, same parser as npm.
+    - Root package is added as a workspace member if it has a name.
+    - Members with duplicate names are skipped with a warning, never
+      both audited.
+
+    threat model: ``.yarnrc.yml`` may set ``yarnPath`` to an arbitrary
+    JS file, which yarn then runs. secscan considers ``yarn`` itself
+    trusted (same way we trust ``npm``, ``pnpm``, ``pip-audit``,
+    ``semgrep``) — running on untrusted repos is out of scope.
+    """
+    yarn_lock = root.resolved / "yarn.lock"
+    pkg_json = root.resolved / "package.json"
+    if not _is_real_file(yarn_lock) or not _is_real_file(pkg_json):
+        return None
+    # Defer to the npm/pnpm path if those lockfiles are also present —
+    # detect_yarn_unsupported already emitted a drift warning in that case.
+    if _is_real_file(root.resolved / "package-lock.json"):
+        return None
+    if _is_real_file(root.resolved / "pnpm-lock.yaml"):
+        return None
+    version = _detect_yarn_major(root)
+    if version != 2 and version != 3 and version != 4:
+        # Versions 2/3/4 are Berry; 1 is Classic; None is unknown.
+        # Classic / unknown are warned about in ``detect_yarn_unsupported``;
+        # don't double-warn here.
+        return None
+
+    raw = _read_json(pkg_json)
+    if not isinstance(raw, dict):
+        return None
+    raw_workspaces = raw.get("workspaces")
+
+    includes: list[str]
+    excludes: list[str]
+    glob_warnings: list[str]
+    if raw_workspaces is None:
+        # Pure single-package Yarn Berry repo. Still produce one unit
+        # bound to the root package name (if any).
+        includes, excludes, glob_warnings = [], [], []
+    elif isinstance(raw_workspaces, list):
+        includes, excludes, glob_warnings = _split_globs(raw_workspaces, source="yarn")
+    elif isinstance(raw_workspaces, dict):
+        nested = raw_workspaces.get("packages")
+        if not isinstance(nested, list):
+            return WorkspaceExpansion(
+                provider="yarn",
+                units=(),
+                warnings=(
+                    "Yarn workspaces.packages is not a list",
+                ),
+            )
+        includes, excludes, glob_warnings = _split_globs(nested, source="yarn")
+    else:
+        return WorkspaceExpansion(
+            provider="yarn",
+            units=(),
+            warnings=(
+                "Yarn workspaces must be a list or object",
+            ),
+        )
+
+    member_dirs = _expand_globs(root, includes, excludes)
+    # Always include the root project (Berry treats root as a member).
+    if root.resolved not in member_dirs:
+        member_dirs = [root.resolved, *member_dirs]
+    units, count_warnings = _build_yarn_units(root, member_dirs)
+    return WorkspaceExpansion(
+        provider="yarn",
+        units=units,
+        warnings=tuple(glob_warnings) + tuple(count_warnings),
+    )
+
+
+def _detect_yarn_major(root: ResolvedRoot) -> int | None:
+    """Best-effort detection of the Yarn major version without exec.
+
+    Priority order (Codex 28th review):
+      1. ``package.json#packageManager: "yarn@<ver>"`` — Corepack
+         convention, the most authoritative modern signal.
+      2. ``yarn.lock`` header — Classic starts with
+         ``# THIS IS AN AUTOGENERATED FILE``... and
+         ``# yarn lockfile v1``; Berry starts with ``__metadata:``.
+      3. ``.yarnrc.yml`` (Berry-only file) → Berry.
+
+    Returns ``None`` when none of the signals can place the repo on a
+    Yarn major. Callers turn that into a warning rather than guessing.
+    """
+    pkg_json = root.resolved / "package.json"
+    raw = _read_json(pkg_json) if _is_real_file(pkg_json) else None
+    if isinstance(raw, dict):
+        pm = raw.get("packageManager")
+        if isinstance(pm, str):
+            match = re.match(r"^yarn@(\d+)", pm.strip())
+            if match:
+                return int(match.group(1))
+    yarn_lock = root.resolved / "yarn.lock"
+    if _is_real_file(yarn_lock):
+        try:
+            head = yarn_lock.read_text(encoding="utf-8", errors="ignore")[:2048]
+        except OSError:
+            head = ""
+        if "yarn lockfile v1" in head:
+            return 1
+        if "__metadata:" in head:
+            return 3  # Berry; we collapse 2/3/4 into "Berry" downstream.
+    if _is_real_file(root.resolved / ".yarnrc.yml"):
+        return 3
+    return None
+
+
+# npm package name spec (per docs.npmjs.com): lowercase, URL-safe,
+# 214-char max, may include hyphens/underscores/dots/slashes (for
+# scoped packages), but MUST NOT start with ``.`` or ``_``, MUST NOT
+# contain control or whitespace, and MUST NOT start with ``-`` (which
+# would look like a CLI flag to ``yarn workspace -X``).
+_VALID_NPM_NAME = re.compile(
+    r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._~-]*$"
+)
+
+
+def _is_safe_npm_name(name: str) -> bool:
+    if len(name) > 214:
+        return False
+    if not _VALID_NPM_NAME.match(name):
+        return False
+    if name.startswith("-") or name.startswith(".") or name.startswith("_"):
+        return False
+    return ".." not in name
+
+
+def _build_yarn_units(
+    root: ResolvedRoot, member_dirs: list[Path]
+) -> tuple[tuple[WorkUnit, ...], list[str]]:
+    """Build WorkUnits for a Yarn Berry workspace expansion.
+
+    Same shape as ``_build_npm_units``: audit runs from the repo root,
+    each unit carries a workspace_id (npm package name) the adapter
+    forwards as ``yarn workspace <id> npm audit``. Duplicate names and
+    selector-grammar names are skipped with a warning.
+    """
+    warnings: list[str] = []
+    truncated = False
+    if len(member_dirs) > _WORKSPACE_HARD_CAP:
+        warnings.append(
+            f"Yarn workspace has {len(member_dirs)} members; truncating to "
+            f"{_WORKSPACE_HARD_CAP}."
+        )
+        member_dirs = member_dirs[:_WORKSPACE_HARD_CAP]
+        truncated = True
+    elif len(member_dirs) > _WORKSPACE_WARN_THRESHOLD:
+        warnings.append(
+            f"Yarn workspace has {len(member_dirs)} members; secscan will "
+            f"audit each individually."
+        )
+
+    units: list[WorkUnit] = []
+    seen: set[str] = set()
+    for member in member_dirs:
+        manifest = member / "package.json"
+        if not _is_real_file(manifest):
+            continue
+        raw = _read_json(manifest)
+        if not isinstance(raw, dict):
+            continue
+        name = raw.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        stripped = name.strip()
+        if not _is_safe_npm_name(stripped):
+            try:
+                rel = member.relative_to(root.resolved)
+                warnings.append(
+                    f"Yarn workspace member '{stripped}' at '{rel.as_posix()}' "
+                    f"is not a valid npm package name; skipped."
+                )
+            except ValueError:
+                warnings.append(
+                    f"Yarn workspace member '{stripped}' is not a valid "
+                    f"npm package name; skipped."
+                )
+            continue
+        if _UNSAFE_SELECTOR_CHARS.search(stripped):
+            warnings.append(
+                f"Yarn workspace member '{stripped}' has selector grammar "
+                f"characters; skipped."
+            )
+            continue
+        if stripped in seen:
+            warnings.append(
+                f"Yarn workspace has duplicate package name '{stripped}'; "
+                f"the second occurrence was skipped."
+            )
+            continue
+        seen.add(stripped)
+        try:
+            member_path = member.relative_to(root.resolved)
+        except ValueError:
+            continue
+        units.append(
+            WorkUnit(
+                root=root.resolved,
+                ecosystem="npm",
+                manifest=manifest,
+                lockfile=root.resolved / "yarn.lock",
+                package_manager="yarn",
+                workspace_id=stripped,
+                workspace_member_path=member_path,
+            )
+        )
+    if not units and not truncated and not warnings:
+        warnings.append("Yarn workspace patterns matched no members.")
+    return tuple(units), warnings
 
 
 # --- Internals -----------------------------------------------------------

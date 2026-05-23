@@ -460,13 +460,15 @@ def test_uv_workspace_malformed_members_warns(tmp_path: Path) -> None:
 # --- yarn unsupported warning -------------------------------------------
 
 
-def test_yarn_lock_with_workspaces_warns(tmp_path: Path) -> None:
-    (tmp_path / "yarn.lock").write_text("# yarn lock\n")
+def test_yarn_classic_workspaces_emits_unsupported_warning(tmp_path: Path) -> None:
+    """A repo with Yarn v1 (Classic) lockfile + workspaces is NOT
+    automatically processed; we emit a Classic-specific warning."""
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
     _write_root_package(tmp_path, workspaces=["packages/*"])
     root = resolve_scan_root(tmp_path)
     warnings = detect_yarn_unsupported(root)
     assert warnings
-    assert any("yarn workspaces" in w for w in warnings)
+    assert any("Yarn v1 (Classic)" in w for w in warnings)
 
 
 def test_yarn_lock_with_other_lockfile_emits_drift_warning(
@@ -480,11 +482,25 @@ def test_yarn_lock_with_other_lockfile_emits_drift_warning(
     assert any("drift" in w for w in warnings)
 
 
-def test_yarn_lock_alone_no_workspaces_no_warning(tmp_path: Path) -> None:
-    (tmp_path / "yarn.lock").write_text("# yarn lock\n")
+def test_yarn_classic_no_workspaces_warns_about_unsupported(tmp_path: Path) -> None:
+    """A Yarn Classic lockfile by itself (no workspaces) still gets a
+    warning because we can't audit Classic projects with this release."""
+    (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
     (tmp_path / "package.json").write_text(json.dumps({"name": "x"}))
     root = resolve_scan_root(tmp_path)
-    assert detect_yarn_unsupported(root) == ()
+    warnings = detect_yarn_unsupported(root)
+    assert any("Yarn v1 (Classic)" in w for w in warnings)
+
+
+def test_yarn_lock_with_indeterminate_version_warns(tmp_path: Path) -> None:
+    """When neither packageManager nor lockfile-format-marker nor
+    .yarnrc.yml identifies the major version, we don't run audit and
+    we tell the user how to disambiguate."""
+    (tmp_path / "yarn.lock").write_text("# ambiguous content\n")
+    (tmp_path / "package.json").write_text(json.dumps({"name": "x"}))
+    root = resolve_scan_root(tmp_path)
+    warnings = detect_yarn_unsupported(root)
+    assert any("could not be determined" in w for w in warnings)
 
 
 # --- workspace count limits ---------------------------------------------
