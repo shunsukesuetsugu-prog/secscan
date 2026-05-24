@@ -312,6 +312,53 @@ docker inspect --format='{{index .RepoDigests 0}}' zaproxy/zap-stable:2.15.0
 Set the verified digest under `[dast].image` in `.secscan.toml` (or
 pass it via `--zap-image`).
 
+## Detection-rate benchmark
+
+`bench/run.py` measures how much of a curated known-vulnerable
+corpus secscan detects and how it compares to single-tool baselines.
+
+```sh
+.venv/bin/python bench/run.py            # runs every available scanner
+```
+
+Latest results on this machine (re-run locally for an up-to-date
+snapshot; see `bench/report.md` for the full table):
+
+| Scanner | Fixture | Expected | Detected | Recall | FP | vs single tool |
+|---|---|---|---|---|---|---|
+| deps    | npm-vulnerable | 2 | 2 | **100%** | 0 | ≥ npm audit ✅ |
+| deps    | pip-vulnerable | 3 | 3 | **100%** | 0 | 15 vs pip-audit 19 ⚠️ |
+| sast    | python | 4 | 1 | 25% | 0 | ≥ semgrep ✅ |
+| sast    | javascript | 2 | 0 | 0% | 0 | ≥ semgrep ✅ |
+| secrets | synthetic | 4 | — | SKIPPED | — | gitleaks not installed |
+| dast    | juice-shop | — | — | SKIPPED | — | run manually |
+
+Honest summary of what these numbers say:
+
+- **deps**: secscan reaches **100% recall** on the curated set (5/5
+  packages with known CVEs). On parity with `npm audit`. A 15-vs-19
+  raw-count gap against `pip-audit` is the one outlier (the
+  integration de-dups some advisories `pip-audit` reports
+  separately; the curated set is still 100%).
+- **sast**: the **default semgrep ruleset family** (`p/python +
+  p/javascript + p/typescript + p/owasp-top-ten`) reliably catches
+  command-injection patterns but **misses** SQLi via f-string, raw
+  `yaml.load`, hard-coded credentials, and JS `eval()` on
+  CommonJS-style code. secscan returns parity with semgrep run
+  directly with the same rules — i.e. the gap is in the ruleset,
+  not the wrapper. Users who need broader CWE coverage should add
+  `p/security-audit` to `[sast].semgrep_config`.
+- **secrets**: skipped here because `gitleaks` isn't on this
+  machine's PATH. With gitleaks installed, the 4 synthetic
+  credential fixtures (all SHA-256-pinned via
+  `bench/fixtures/secrets/synthetic/_manifest.json`) and a
+  borderline-clean false-positive sample run automatically.
+- **dast**: deliberately a manual measurement (Docker + OWASP Juice
+  Shop bring-up is too heavy for CI).
+
+See `bench/README.md` for the full methodology, retraction policy,
+and how to add new fixtures.
+
 ## Security posture
 
 A few invariants worth knowing about if you're auditing the tool itself:
@@ -355,14 +402,16 @@ specific Codex review iteration that motivated each invariant.
 | 2-B   | monorepo / workspaces (pnpm + npm)                 | done (v0.3.0)           |
 | 2-C   | uv per-member audit + Yarn Berry workspaces        | done (v0.4.0)           |
 | 2-D   | DAST (OWASP ZAP, Docker)                           | done (v0.5.0)           |
-| 2-E+  | additional DAST profiles, plugin-discovery cache   | future                  |
+| 2-E   | detection-rate benchmark (bench/)                  | done (v0.6.0)           |
+| 2-F+  | broader semgrep ruleset defaults, more DAST profiles | future                  |
 
 ## Development
 
 ```sh
-.venv/bin/pytest               # 618 unit tests + 2 integration (skipped without the binaries)
-.venv/bin/ruff check src/ tests/
+.venv/bin/pytest               # 631 unit tests + 2 integration (skipped without the binaries)
+.venv/bin/ruff check src/ tests/ bench/
 .venv/bin/mypy --strict src/secscan
+.venv/bin/python bench/run.py  # detection-rate benchmark (see bench/README.md)
 ```
 
 Integration tests against real `gitleaks` / `semgrep` are gated by

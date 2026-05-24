@@ -1,0 +1,7 @@
+# Benchmark fixture: intentionally-vulnerable pinned versions.
+# DO NOT install. pip-audit / secscan only read the file; no install is needed.
+# All advisories below were confirmed in the PyPI advisory database
+# at fixture-creation time (2026-05-24); see expected.json for stable IDs.
+urllib3==1.26.4
+pyyaml==5.3.1
+jinja2==2.11.2

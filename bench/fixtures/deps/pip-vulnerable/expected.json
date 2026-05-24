@@ -1,0 +1,30 @@
+{
+  "ecosystem": "pypi",
+  "tool_under_test": "secscan deps",
+  "comparison_tool": "pip-audit",
+  "advisory_db_snapshot": "2026-05-24",
+  "notes": [
+    "Match logic: a fixture entry is 'detected' iff secscan emits at",
+    "least one finding for ``package`` (ID format varies — PYSEC, GHSA,",
+    "and CVE all appear in the wild for the same advisory). Package-",
+    "based matching is more robust across advisory-DB rename events",
+    "(GLM 1st review pin: retract resilience)."
+  ],
+  "expected_findings": [
+    {
+      "package": "urllib3",
+      "min_severity": "MEDIUM",
+      "description": "urllib3 1.26.4 has known CRLF / SSRF / DoS issues (CVE-2021-33503 etc.)"
+    },
+    {
+      "package": "pyyaml",
+      "min_severity": "HIGH",
+      "description": "PyYAML 5.3.1 has yaml.load arbitrary code execution (CVE-2020-14343)"
+    },
+    {
+      "package": "jinja2",
+      "min_severity": "MEDIUM",
+      "description": "Jinja2 2.11.2 has known regex-DoS issue (CVE-2020-28493)"
+    }
+  ]
+}

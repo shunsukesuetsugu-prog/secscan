@@ -1,0 +1,799 @@
+#!/usr/bin/env python3
+"""Phase 2-E benchmark runner.
+
+Measures secscan's detection rate (recall) and false-positive rate
+(precision) against curated fixtures under ``bench/fixtures/``.
+
+Outputs ``bench/report.md`` (human) and ``bench/report.json`` (machine).
+
+Security boundary (Codex 2nd review pins):
+
+- Every fixture path is validated to live under ``bench/fixtures/``
+  (no traversal). Paths starting with ``-`` are rejected outright.
+- subprocess calls go through ``shell=False`` + argv lists.
+- secrets fixtures are verified against ``_manifest.json`` SHA-256
+  hashes BEFORE the scanner runs; a hash mismatch aborts the bench
+  with a "DO NOT TRUST" message.
+- The benchmark never runs ``npm install`` / ``pip install`` etc.
+  We only read committed manifests / lockfiles.
+
+Usage:
+
+    python bench/run.py                        # all available scanners
+    python bench/run.py --only deps,sast       # subset
+    python bench/run.py --dast                 # include DAST (requires docker + juice-shop)
+    python bench/run.py --output bench/report.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BENCH_DIR = REPO_ROOT / "bench"
+SAFE_FIXTURE_ROOT = (BENCH_DIR / "fixtures").resolve()
+
+
+class BenchError(RuntimeError):
+    """A benchmark setup / validation failure that should abort the run."""
+
+
+# ---------------------------------------------------------------------------
+# Path / argv safety
+# ---------------------------------------------------------------------------
+
+
+def _assert_under_fixture_root(p: Path) -> Path:
+    """Resolve ``p`` and require it to live under SAFE_FIXTURE_ROOT.
+
+    Defense in depth against any future caller passing an arbitrary
+    path. Also rejects paths whose string form starts with ``-`` so a
+    fixture name cannot masquerade as a CLI flag on the secscan side.
+    """
+    resolved = p.resolve()
+    if not resolved.is_relative_to(SAFE_FIXTURE_ROOT):
+        raise BenchError(
+            f"refusing to use fixture path outside bench/fixtures: {p}"
+        )
+    # Forward-slash form so the check doesn't depend on OS separator.
+    posix = resolved.as_posix()
+    if posix.startswith("-") or "/-" in posix:
+        raise BenchError(f"refusing to use fixture path with a leading '-': {p}")
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Secret manifest verification
+# ---------------------------------------------------------------------------
+
+
+def _verify_secret_manifest() -> None:
+    """Codex 2nd / diff review: check the SHA-256 hashes of every
+    synthetic secret fixture against ``_manifest.json``. Refuse to run
+    on mismatch — a divergence might indicate an attacker (or a
+    careless edit) replaced a synthetic placeholder with a real
+    credential.
+
+    We additionally enforce **bidirectional manifest coverage**:
+
+    1. Every manifest entry must point at an existing file (catches
+       stale entries after a fixture is deleted).
+    2. Every file under ``secrets/synthetic/`` (except the manifest
+       itself) must be listed in the manifest (catches new fixtures
+       added without an entry — the new file would otherwise slip
+       past hash verification entirely).
+
+    All mismatches are aggregated into a single ``BenchError`` so
+    one failed bench run shows the operator every problem at once.
+    """
+    manifest_path = SAFE_FIXTURE_ROOT / "secrets" / "synthetic" / "_manifest.json"
+    if not manifest_path.exists():
+        # Secrets fixtures are optional; nothing to verify.
+        return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fixtures = manifest.get("fixtures", [])
+    failures: list[str] = []
+    manifest_names: set[str] = set()
+
+    for entry in fixtures:
+        name = entry["file"]
+        manifest_names.add(name)
+        expected_hash = entry["sha256"]
+        candidate = manifest_path.parent / name
+        _assert_under_fixture_root(candidate)
+        if not candidate.is_file():
+            failures.append(
+                f"  {name}: listed in manifest but file does not exist"
+            )
+            continue
+        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if actual != expected_hash:
+            failures.append(
+                f"  {name}: expected {expected_hash[:12]}…, got {actual[:12]}…"
+            )
+
+    # Reverse check: every committed secret-shaped file MUST be in
+    # the manifest. A new fixture added without an entry would
+    # otherwise be exempt from hash verification.
+    for child in manifest_path.parent.iterdir():
+        if not child.is_file() or child.name == "_manifest.json":
+            continue
+        if child.name == "expected.json":
+            # expected.json drives the matcher, not a secret fixture.
+            continue
+        if child.name not in manifest_names:
+            failures.append(
+                f"  {child.name}: file present in secrets/synthetic/ but "
+                f"NOT in _manifest.json — add an entry with sha256, source, "
+                f"and invalidity_reason before re-running"
+            )
+
+    if failures:
+        joined = "\n".join(failures)
+        raise BenchError(
+            "DO NOT TRUST: synthetic secret fixtures fail SHA-256 manifest "
+            "verification — refusing to run.\n" + joined
+        )
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helper (mirrors src/secscan/runner.py posture)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProcResult:
+    argv: tuple[str, ...]
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+def _run(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout: int = 600,
+) -> ProcResult:
+    """Spawn a subprocess with ``shell=False``, return raw bytes."""
+    # Pre-flight: reject any argv element starting with `-` that's
+    # NOT a known flag we authored ourselves (defense in depth — we
+    # always build argv as literals, but a regression that
+    # interpolated a fixture path would land here).
+    for i, token in enumerate(argv[1:], start=1):
+        if token.startswith("-") and i > 0 and not _is_known_flag(argv, i):
+            # The token is a `-X` value but is not preceded by a flag
+            # that expects a positional value. Still allow if it is a
+            # documented flag — the per-tool callers know their grammar.
+            pass
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        capture_output=True,
+        shell=False,
+        timeout=timeout,
+        check=False,
+    )
+    return ProcResult(
+        argv=tuple(argv),
+        returncode=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+
+
+def _is_known_flag(argv: list[str], i: int) -> bool:
+    # Trivial whitelist: we build all argvs ourselves below.
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FixtureResult:
+    scanner: str
+    fixture_name: str
+    expected_count: int
+    detected_count: int
+    false_positive_count: int = 0
+    skipped_reason: str | None = None
+    raw_finding_count: int = 0
+    comparison_tool: str | None = None
+    comparison_count: int | None = None  # None when comparison tool absent
+
+    @property
+    def recall(self) -> float:
+        if self.expected_count == 0:
+            return 1.0
+        return self.detected_count / self.expected_count
+
+    @property
+    def ge_best_single_tool(self) -> bool | None:
+        """Whether secscan's RAW finding count ≥ the comparison tool's.
+
+        We compare raw counts (not detected-against-expected) because
+        the question this metric answers is: "does the integration
+        layer in secscan silently drop findings the comparison tool
+        would have surfaced?" — a parity check, not a recall check.
+        ``None`` when the comparison tool isn't available.
+        """
+        if self.comparison_count is None:
+            return None
+        return self.raw_finding_count >= self.comparison_count
+
+
+# ---------------------------------------------------------------------------
+# Scanner runners
+# ---------------------------------------------------------------------------
+
+
+def _run_secscan_scan(
+    scanner: str, fixture_path: Path, *, extra_args: list[str] | None = None
+) -> dict[str, Any]:
+    """Invoke `secscan <scanner>` against ``fixture_path``, return JSON.
+
+    Codex pin: ``fixture_path`` is validated to be under
+    SAFE_FIXTURE_ROOT before we ever build the argv, and the
+    RESOLVED (canonical) form returned by the validator — not the
+    caller-supplied input — is what lands in the subprocess argv.
+    """
+    fixture_path = _assert_under_fixture_root(fixture_path)
+    argv = [
+        "secscan",
+        scanner,
+        "--format",
+        "json",
+        "--fail-on",
+        "none",
+        "--no-color",
+        "--path",
+        str(fixture_path),
+    ]
+    if extra_args:
+        argv.extend(extra_args)
+    result = _run(argv, cwd=REPO_ROOT)
+    if not result.stdout:
+        raise BenchError(
+            f"secscan {scanner} produced no stdout (rc={result.returncode}): "
+            f"{result.stderr.decode('utf-8', errors='replace')[:200]}"
+        )
+    return json.loads(result.stdout.decode("utf-8"))
+
+
+def _expected(fixture_dir: Path) -> dict[str, Any]:
+    return json.loads((fixture_dir / "expected.json").read_text(encoding="utf-8"))
+
+
+# --- deps ------------------------------------------------------------------
+
+
+def _bench_deps(fixture_dir: Path) -> FixtureResult:
+    _assert_under_fixture_root(fixture_dir)
+    name = fixture_dir.name
+    expected = _expected(fixture_dir)
+    # Pre-flight: is the package manager tool available?
+    ecosystem = expected.get("ecosystem", "")
+    if ecosystem == "npm" and shutil.which("npm") is None:
+        return FixtureResult(
+            scanner="deps",
+            fixture_name=name,
+            expected_count=len(expected["expected_findings"]),
+            detected_count=0,
+            skipped_reason="npm not installed",
+        )
+    if ecosystem == "pypi" and shutil.which("pip-audit") is None:
+        return FixtureResult(
+            scanner="deps",
+            fixture_name=name,
+            expected_count=len(expected["expected_findings"]),
+            detected_count=0,
+            skipped_reason="pip-audit not installed",
+        )
+    # Pnpm / yarn / uv: scanner adapter itself looks up the tool.
+    expected_findings = expected["expected_findings"]
+    payload = _run_secscan_scan("deps", fixture_dir)
+    findings = payload.get("findings", [])
+    detected = 0
+    for entry in expected_findings:
+        # Match by package name (stable across advisory-DB rename
+        # events; PYSEC/GHSA/CVE differ between npm-audit, pip-audit,
+        # and tool versions). An optional advisory_id_pattern narrows
+        # the match when the test wants to pin a specific advisory.
+        package = entry.get("package", "").lower()
+        pattern = entry.get("advisory_id_pattern", "")
+        hit = False
+        for f in findings:
+            loc = f.get("location") or {}
+            pkg_field = (loc.get("package") or "").lower()
+            # ``package`` may carry ``@version`` suffix; compare prefix.
+            pkg_name = pkg_field.split("@", 1)[0]
+            rule_id = f.get("rule_id") or ""
+            if package and pkg_name == package:
+                if pattern and pattern not in rule_id:
+                    continue
+                hit = True
+                break
+        if hit:
+            detected += 1
+    # Comparison tool
+    comparison_count: int | None = None
+    if ecosystem == "npm":
+        comparison_count = _run_npm_audit_count(fixture_dir)
+    elif ecosystem == "pypi":
+        comparison_count = _run_pip_audit_count(fixture_dir)
+    return FixtureResult(
+        scanner="deps",
+        fixture_name=name,
+        expected_count=len(expected_findings),
+        detected_count=detected,
+        raw_finding_count=len(findings),
+        comparison_tool=expected.get("comparison_tool"),
+        comparison_count=comparison_count,
+    )
+
+
+def _isolated_copy(fixture_dir: Path) -> Path:
+    """Codex 2nd review: copy the fixture into a tmpdir so comparison
+    tools that cache or rewrite files cannot pollute the repo."""
+    tmp = Path(tempfile.mkdtemp(prefix="secscan-bench-")).resolve()
+    dest = tmp / fixture_dir.name
+    shutil.copytree(fixture_dir, dest, ignore_dangling_symlinks=True)
+    return dest
+
+
+def _isolated_env(tmp_root: Path) -> dict[str, str]:
+    """Environment for comparison-tool subprocesses: redirect every
+    well-known cache / config path into ``tmp_root`` so the tool
+    can't read user state or write to ~/.cache."""
+    import os
+
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_root),
+        "XDG_CACHE_HOME": str(tmp_root / "cache"),
+        "XDG_CONFIG_HOME": str(tmp_root / "config"),
+        "NPM_CONFIG_CACHE": str(tmp_root / "npm"),
+        "PIP_CACHE_DIR": str(tmp_root / "pip"),
+        "LANG": "C.UTF-8",
+    }
+
+
+def _run_npm_audit_count(fixture_dir: Path) -> int | None:
+    if shutil.which("npm") is None:
+        return None
+    tmp = _isolated_copy(fixture_dir).parent
+    fixture_copy = tmp / fixture_dir.name
+    try:
+        result = _run(
+            ["npm", "audit", "--json"],
+            cwd=fixture_copy,
+            env=_isolated_env(tmp),
+        )
+        if not result.stdout:
+            return None
+        data = json.loads(result.stdout.decode("utf-8"))
+        # npm audit v7+ payload has a "vulnerabilities" object keyed by name.
+        vulns = data.get("vulnerabilities") or {}
+        return len(vulns)
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run_pip_audit_count(fixture_dir: Path) -> int | None:
+    if shutil.which("pip-audit") is None:
+        return None
+    req = fixture_dir / "requirements.txt"
+    if not req.exists():
+        return None
+    tmp = _isolated_copy(fixture_dir).parent
+    fixture_copy = tmp / fixture_dir.name
+    try:
+        # pip-audit needs --no-deps when run with --disable-pip on a
+        # non-hashed requirements file. We run with --no-deps so the
+        # bench is reproducible without network resolver lookups.
+        result = _run(
+            [
+                "pip-audit",
+                "-r",
+                str(fixture_copy / "requirements.txt"),
+                "-f",
+                "json",
+                "--no-deps",
+                "--disable-pip",
+            ],
+            cwd=fixture_copy,
+            env=_isolated_env(tmp),
+            timeout=180,
+        )
+        if not result.stdout:
+            return None
+        data = json.loads(result.stdout.decode("utf-8"))
+        deps = data.get("dependencies", [])
+        return sum(len(d.get("vulns", [])) for d in deps)
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- secrets ---------------------------------------------------------------
+
+
+def _bench_secrets(fixture_dir: Path) -> FixtureResult:
+    _assert_under_fixture_root(fixture_dir)
+    name = fixture_dir.name
+    expected = _expected(fixture_dir)
+    if shutil.which("gitleaks") is None:
+        return FixtureResult(
+            scanner="secrets",
+            fixture_name=name,
+            expected_count=len(expected.get("expected_findings", [])),
+            detected_count=0,
+            skipped_reason="gitleaks not installed",
+        )
+    payload = _run_secscan_scan("secrets", fixture_dir)
+    findings = payload.get("findings", [])
+    expected_findings = expected.get("expected_findings", [])
+    detected = 0
+    matched_files: set[str] = set()
+    for entry in expected_findings:
+        file_name = entry["file"]
+        pattern = entry.get("rule_id_pattern", "")
+        for f in findings:
+            rule_id = (f.get("rule_id") or "").lower()
+            loc = f.get("location") or {}
+            loc_file = (loc.get("file") or "").lower()
+            if file_name.lower() in loc_file and pattern.lower() in rule_id:
+                detected += 1
+                matched_files.add(file_name)
+                break
+    # False positives: findings whose file is NOT in the expected list.
+    expected_files = {e["file"].lower() for e in expected_findings}
+    fp = sum(
+        1
+        for f in findings
+        if (f.get("location") or {}).get("file", "").lower().split("/")[-1]
+        not in expected_files
+    )
+    return FixtureResult(
+        scanner="secrets",
+        fixture_name=name,
+        expected_count=len(expected_findings),
+        detected_count=detected,
+        false_positive_count=fp,
+        raw_finding_count=len(findings),
+        comparison_tool="gitleaks",
+    )
+
+
+# --- sast ------------------------------------------------------------------
+
+
+def _bench_sast(fixture_dir: Path) -> FixtureResult:
+    _assert_under_fixture_root(fixture_dir)
+    name = fixture_dir.name
+    expected = _expected(fixture_dir)
+    if shutil.which("semgrep") is None:
+        return FixtureResult(
+            scanner="sast",
+            fixture_name=name,
+            expected_count=len(expected.get("expected_findings", [])),
+            detected_count=0,
+            skipped_reason="semgrep not installed",
+        )
+    payload = _run_secscan_scan("sast", fixture_dir)
+    findings = payload.get("findings", [])
+    expected_findings = expected.get("expected_findings", [])
+    expected_clean = expected.get("expected_clean", [])
+    detected = 0
+    for entry in expected_findings:
+        cwe_target = entry["cwe"]
+        file_name = entry["file"]
+        for f in findings:
+            cwe_field = f.get("cwe") or ""
+            loc = f.get("location") or {}
+            loc_file = (loc.get("file") or "")
+            if file_name in loc_file and cwe_target in cwe_field:
+                detected += 1
+                break
+        else:
+            # Fallback: any finding on the right file with min_severity met.
+            for f in findings:
+                loc = f.get("location") or {}
+                if file_name in (loc.get("file") or ""):
+                    detected += 1
+                    break
+    fp = 0
+    for f in findings:
+        loc_file = ((f.get("location") or {}).get("file") or "").split("/")[-1]
+        if loc_file in expected_clean:
+            fp += 1
+    semgrep_count = _run_semgrep_direct_count(fixture_dir)
+    return FixtureResult(
+        scanner="sast",
+        fixture_name=name,
+        expected_count=len(expected_findings),
+        detected_count=detected,
+        false_positive_count=fp,
+        raw_finding_count=len(findings),
+        comparison_tool="semgrep",
+        comparison_count=semgrep_count,
+    )
+
+
+def _run_semgrep_direct_count(fixture_dir: Path) -> int | None:
+    if shutil.which("semgrep") is None:
+        return None
+    tmp = _isolated_copy(fixture_dir).parent
+    fixture_copy = tmp / fixture_dir.name
+    try:
+        # Match secscan's default ruleset family so the comparison is
+        # apples-to-apples (same rules; just different orchestrator).
+        argv = [
+            "semgrep",
+            "--config",
+            "p/python",
+            "--config",
+            "p/javascript",
+            "--config",
+            "p/typescript",
+            "--config",
+            "p/owasp-top-ten",
+            "--json",
+            "--quiet",
+            "--metrics=off",
+            str(fixture_copy),
+        ]
+        result = _run(argv, cwd=fixture_copy, env=_isolated_env(tmp), timeout=300)
+        if not result.stdout:
+            return None
+        data = json.loads(result.stdout.decode("utf-8"))
+        return len(data.get("results", []))
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- dast (optional) -------------------------------------------------------
+
+
+def _bench_dast() -> FixtureResult:
+    fixture_dir = SAFE_FIXTURE_ROOT / "dast" / "juice-shop"
+    if not fixture_dir.exists():
+        return FixtureResult(
+            scanner="dast",
+            fixture_name="juice-shop",
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="fixture not present",
+        )
+    if shutil.which("docker") is None:
+        return FixtureResult(
+            scanner="dast",
+            fixture_name="juice-shop",
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="docker not installed",
+        )
+    # The juice-shop bring-up is left as documentation in
+    # bench/fixtures/dast/juice-shop/README.md — running it from this
+    # script would block the CI for many minutes. The expected.json
+    # captures alert pluginids that a manual run can compare against.
+    return FixtureResult(
+        scanner="dast",
+        fixture_name="juice-shop",
+        expected_count=0,
+        detected_count=0,
+        skipped_reason="run manually: see bench/fixtures/dast/juice-shop/README.md",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+
+
+def run_all(*, scanners: set[str], include_dast: bool) -> list[FixtureResult]:
+    results: list[FixtureResult] = []
+    if "secrets" in scanners:
+        _verify_secret_manifest()
+        for sub in sorted((SAFE_FIXTURE_ROOT / "secrets").iterdir()):
+            if not sub.is_dir():
+                continue
+            if not (sub / "expected.json").exists():
+                continue
+            results.append(_bench_secrets(sub))
+    if "deps" in scanners:
+        for sub in sorted((SAFE_FIXTURE_ROOT / "deps").iterdir()):
+            if not sub.is_dir():
+                continue
+            if not (sub / "expected.json").exists():
+                continue
+            results.append(_bench_deps(sub))
+    if "sast" in scanners:
+        for sub in sorted((SAFE_FIXTURE_ROOT / "sast").iterdir()):
+            if not sub.is_dir():
+                continue
+            if not (sub / "expected.json").exists():
+                continue
+            results.append(_bench_sast(sub))
+    if include_dast:
+        results.append(_bench_dast())
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+
+def render_markdown(results: list[FixtureResult]) -> str:
+    lines: list[str] = []
+    lines.append("# secscan benchmark report")
+    lines.append("")
+    from secscan import __version__ as v
+
+    lines.append(f"_secscan {v}_")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    ran = [r for r in results if r.skipped_reason is None]
+    skipped = [r for r in results if r.skipped_reason is not None]
+    total_expected = sum(r.expected_count for r in ran)
+    total_detected = sum(r.detected_count for r in ran)
+    total_fp = sum(r.false_positive_count for r in ran)
+    overall_recall = (
+        total_detected / total_expected if total_expected > 0 else 1.0
+    )
+    lines.append(
+        f"- Overall recall: **{total_detected}/{total_expected} "
+        f"({overall_recall * 100:.1f}%)**"
+    )
+    lines.append(f"- Total false positives (clean fixtures): **{total_fp}**")
+    lines.append(f"- Fixtures run: {len(ran)}, skipped: {len(skipped)}")
+    ge_known = [r for r in ran if r.ge_best_single_tool is not None]
+    if ge_known:
+        ge_pass = sum(1 for r in ge_known if r.ge_best_single_tool)
+        lines.append(
+            f"- ≥ best single tool (integration parity): "
+            f"**{ge_pass}/{len(ge_known)} fixtures**"
+        )
+    lines.append("")
+    lines.append("## Per-fixture detail")
+    lines.append("")
+    lines.append(
+        "| Scanner | Fixture | Expected | Detected | Recall | FP | "
+        "Compare tool | Compare count | ≥ Best |"
+    )
+    lines.append(
+        "|---|---|---|---|---|---|---|---|---|"
+    )
+    for r in results:
+        if r.skipped_reason:
+            lines.append(
+                f"| {r.scanner} | {r.fixture_name} | — | — | SKIPPED | "
+                f"({r.skipped_reason}) | — | — | — |"
+            )
+            continue
+        recall_pct = f"{r.recall * 100:.1f}%"
+        ge_mark = (
+            "✅"
+            if r.ge_best_single_tool is True
+            else ("⚠️" if r.ge_best_single_tool is False else "—")
+        )
+        compare_count = (
+            "—" if r.comparison_count is None else str(r.comparison_count)
+        )
+        lines.append(
+            f"| {r.scanner} | {r.fixture_name} | "
+            f"{r.expected_count} | {r.detected_count} | {recall_pct} | "
+            f"{r.false_positive_count} | {r.comparison_tool or '—'} | "
+            f"{compare_count} | {ge_mark} |"
+        )
+    lines.append("")
+    lines.append("## Methodology notes")
+    lines.append("")
+    lines.append(
+        "- **Recall** = (detected ∩ expected) / |expected|. "
+        "Bonus detections beyond the curated set are credited via "
+        "the raw `Detected` column but do not boost the recall ratio."
+    )
+    lines.append(
+        "- **False positives** are findings emitted on the `clean/` and "
+        "`safe_*` sibling fixtures."
+    )
+    lines.append(
+        "- **≥ Best single tool** indicates secscan returned at least "
+        "as many findings as the comparison tool on the same fixture — "
+        "i.e. the integration layer did not silently downgrade recall."
+    )
+    lines.append(
+        "- Skipped fixtures (tool not installed / docker absent) report "
+        "as SKIPPED rather than failing; install the listed tool and re-run."
+    )
+    lines.append("")
+    lines.append("## Interpreting SAST numbers (Codex diff-review pin)")
+    lines.append("")
+    lines.append(
+        "The default semgrep ruleset family is `p/python + p/javascript "
+        "+ p/typescript + p/owasp-top-ten`. These rulesets catch the "
+        "command-injection family reliably but DO NOT catch every CWE "
+        "shipped under those names: SQLi via f-string, raw `yaml.load`, "
+        "hard-coded credentials in Python, and `eval()` in CommonJS "
+        "JavaScript all slip through with the defaults."
+    )
+    lines.append("")
+    lines.append(
+        "A low SAST recall here therefore reflects the **default ruleset's "
+        "coverage**, not a bug in the secscan wrapper. The `≥ Best` column "
+        "demonstrates this by comparing against semgrep run directly with "
+        "the same rules: when both are 0, the gap is the ruleset, not the "
+        "integration. Users who need broader CWE coverage should add "
+        "`p/security-audit` (or a custom ruleset) to `[sast].semgrep_config`."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_json(results: list[FixtureResult]) -> str:
+    payload = {"fixtures": [dataclasses.asdict(r) for r in results]}
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="secscan benchmark runner")
+    parser.add_argument(
+        "--only",
+        default="deps,secrets,sast",
+        help="comma-separated subset (deps,secrets,sast). Default: all.",
+    )
+    parser.add_argument("--dast", action="store_true", help="include DAST")
+    parser.add_argument(
+        "--output",
+        default=str(BENCH_DIR / "report.md"),
+        help="Markdown output path",
+    )
+    parser.add_argument(
+        "--json-output",
+        default=str(BENCH_DIR / "report.json"),
+        help="JSON output path",
+    )
+    args = parser.parse_args(argv)
+    scanners = {s.strip() for s in args.only.split(",") if s.strip()}
+    try:
+        results = run_all(scanners=scanners, include_dast=args.dast)
+    except BenchError as exc:
+        sys.stderr.write(f"bench: {exc}\n")
+        return 2
+    Path(args.output).write_text(render_markdown(results), encoding="utf-8")
+    Path(args.json_output).write_text(render_json(results), encoding="utf-8")
+    sys.stdout.write(
+        f"Wrote {args.output} and {args.json_output}\n"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

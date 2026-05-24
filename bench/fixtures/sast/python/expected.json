@@ -1,0 +1,24 @@
+{
+  "tool_under_test": "secscan sast",
+  "comparison_tool": "semgrep",
+  "language": "python",
+  "ruleset_hint": "p/python + p/owasp-top-ten (secscan default)",
+  "notes": [
+    "Each *vulnerable* fixture targets exactly one CWE category.",
+    "Each *safe_* counterpart uses the documented safe pattern; a finding",
+    "in those files counts as a false positive (GLM 1st review pin).",
+    "Recall = files with vulnerability that triggered ≥ 1 finding / 4.",
+    "Precision = vulnerable findings / total findings."
+  ],
+  "expected_findings": [
+    {"file": "cwe78_cmd_injection.py", "cwe": "CWE-78", "min_severity": "MEDIUM"},
+    {"file": "cwe89_sql_injection.py", "cwe": "CWE-89", "min_severity": "MEDIUM"},
+    {"file": "cwe502_yaml_load.py", "cwe": "CWE-502", "min_severity": "MEDIUM"},
+    {"file": "cwe798_hardcoded.py", "cwe": "CWE-798", "min_severity": "INFO"}
+  ],
+  "expected_clean": [
+    "safe_subprocess.py",
+    "safe_sql.py",
+    "safe_yaml.py"
+  ]
+}

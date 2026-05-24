@@ -1,0 +1,10 @@
+{
+  "name": "secscan-bench-npm-vulnerable",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Benchmark fixture; pins known-vulnerable versions. DO NOT npm install.",
+  "dependencies": {
+    "lodash": "4.17.20",
+    "minimist": "1.2.5"
+  }
+}

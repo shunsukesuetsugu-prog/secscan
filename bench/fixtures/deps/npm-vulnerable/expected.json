@@ -1,0 +1,23 @@
+{
+  "ecosystem": "npm",
+  "tool_under_test": "secscan deps",
+  "comparison_tool": "npm audit",
+  "advisory_db_snapshot": "2026-05-24",
+  "notes": [
+    "Match logic: package-based — see pip-vulnerable/expected.json.",
+    "Advisory IDs vary (GHSA / CVE / numeric) across npm-audit versions",
+    "so package-name matching is the stable contract."
+  ],
+  "expected_findings": [
+    {
+      "package": "lodash",
+      "min_severity": "HIGH",
+      "description": "lodash 4.17.20 has multiple known issues including command injection in _.template (CVE-2021-23337)"
+    },
+    {
+      "package": "minimist",
+      "min_severity": "MEDIUM",
+      "description": "minimist 1.2.5 has prototype pollution (CVE-2021-44906)"
+    }
+  ]
+}

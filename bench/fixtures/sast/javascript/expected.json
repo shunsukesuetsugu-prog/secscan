@@ -1,0 +1,14 @@
+{
+  "tool_under_test": "secscan sast",
+  "comparison_tool": "semgrep",
+  "language": "javascript",
+  "ruleset_hint": "p/javascript + p/owasp-top-ten (secscan default)",
+  "notes": [
+    "Two CWEs in this directory; safe_exec.js is the GLM-pinned border case."
+  ],
+  "expected_findings": [
+    {"file": "cwe78_cmd_injection.js", "cwe": "CWE-78", "min_severity": "MEDIUM"},
+    {"file": "cwe502_eval.js", "cwe": "CWE-95", "min_severity": "MEDIUM"}
+  ],
+  "expected_clean": ["safe_exec.js"]
+}
