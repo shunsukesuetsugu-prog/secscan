@@ -37,7 +37,26 @@ secscan all --path .
 
 Requires Python 3.11 or newer.
 
-### From PyPI
+### Homebrew (macOS / Linux)
+
+```sh
+brew install shunsukesuetsugu-prog/secscan/secscan
+secscan --version          # → secscan 0.19.0
+```
+
+Tap repo: [shunsukesuetsugu-prog/homebrew-secscan](https://github.com/shunsukesuetsugu-prog/homebrew-secscan).
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add secscan https://github.com/shunsukesuetsugu-prog/scoop-secscan
+scoop install secscan
+secscan --version          # → secscan 0.19.0
+```
+
+Bucket repo: [shunsukesuetsugu-prog/scoop-secscan](https://github.com/shunsukesuetsugu-prog/scoop-secscan).
+
+### From PyPI (any platform with pip)
 
 ```sh
 pip install shun-secscan          # installs the ``secscan`` command
@@ -48,7 +67,9 @@ The PyPI *distribution* name is `shun-secscan` (the bare `secscan`
 and the `py-` prefix variant were both blocked by PyPI's similarity
 gate against an unrelated `secscan-cli` package — see the note in
 `pyproject.toml`). The CLI command and Python import name are
-still `secscan`.
+still `secscan`. Homebrew formula and Scoop manifest both alias
+this back to `secscan` so end-users see one name regardless of
+the install path.
 
 ### From source
 
