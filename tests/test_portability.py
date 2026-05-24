@@ -16,6 +16,7 @@ Windows.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,18 @@ class TestToDockerHostPathPosix:
             == "/Users/foo/bar"
         )
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "On Windows, ``Path('/Users/foo/bar')`` is a "
+            "WindowsPath whose ``str()`` form is "
+            "'\\\\Users\\\\foo\\\\bar' — not absolute under the "
+            "POSIX gate. The POSIX-Path-object codepath is "
+            "exercised on POSIX hosts where ``Path`` IS a "
+            "PosixPath; this test is meaningless under a "
+            "Windows interpreter."
+        ),
+    )
     def test_posix_path_object(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

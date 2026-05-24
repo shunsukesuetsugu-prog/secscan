@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from secscan.models import Severity
+from secscan.portability import to_docker_host_path
 from secscan.scanners.sbom._pinned import (
     DEFAULT_GRYPE_IMAGE,
     DEFAULT_SYFT_IMAGE,
@@ -211,7 +212,13 @@ class TestGrypeArgvFromSbomFile:
             None,
         )
         assert mount is not None
-        assert mount.startswith(f"{f}:") or mount.startswith(f"{f.resolve()}:")
+        # Use the docker-host form (Windows ``C:\\...`` → ``/c/...``)
+        # — the argv carries the converted path, not the raw one.
+        host = to_docker_host_path(f)
+        host_resolved = to_docker_host_path(f.resolve())
+        assert mount.startswith(f"{host}:") or mount.startswith(
+            f"{host_resolved}:"
+        )
         assert "intermediate" not in " ".join(argv)
         # Grype argument uses the in-container path.
         sep = argv.index("--")

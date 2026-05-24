@@ -121,9 +121,13 @@ default_expiry_days = 30
 
 def test_baseline_absolute_path_is_left_alone(tmp_path: Path) -> None:
     abs_path = (tmp_path / "elsewhere" / "bl.json").resolve()
+    # Use a TOML *literal* string (single quotes) so Windows
+    # backslashes in ``abs_path`` (``C:\\Users\\...``) are NOT
+    # interpreted as escape sequences (``\\U...`` would otherwise
+    # be parsed as a unicode escape and raise TOMLDecodeError).
     cfg_text = f"""
 [baseline]
-path = "{abs_path}"
+path = '{abs_path}'
 """
     p = tmp_path / CONFIG_FILENAME
     p.write_text(cfg_text)

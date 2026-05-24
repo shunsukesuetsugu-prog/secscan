@@ -1,0 +1,28 @@
+# Force LF line endings on all text files across all platforms.
+# Without this, Git on Windows may convert LF → CRLF on checkout
+# (depending on ``core.autocrlf``) which would break SHA-256
+# manifest verification of the synthetic-secret fixtures.
+* text=auto eol=lf
+
+# Treat the synthetic-secret fixtures as binary so Git makes NO
+# line-ending or encoding transformation on checkout. The
+# manifest in bench/fixtures/secrets/synthetic/_manifest.json
+# pins each file's SHA-256; any conversion would diverge from the
+# pinned hash and ``bench/run.py`` would refuse to start.
+bench/fixtures/secrets/synthetic/*.txt -text
+bench/fixtures/secrets/synthetic/*.json -text
+
+# Lockfile fixtures (Phase 2-Q supply chain) are similarly
+# integrity-checked — keep them byte-identical across OSes.
+bench/fixtures/supply/**/package-lock.json -text
+bench/fixtures/supply/**/Pipfile.lock -text
+bench/fixtures/supply/**/uv.lock -text
+
+# SBOM fixtures are committed CycloneDX JSON used in Phase 2-N.
+bench/fixtures/sbom/**/*.json -text
+
+# pyrasp NDJSON event log fixtures (Phase 2-P).
+bench/fixtures/iast/**/*.ndjson -text
+
+# Schemathesis NDJSON fixtures (Phase 2-O).
+bench/fixtures/apifuzz/**/*.ndjson -text
