@@ -1,0 +1,7 @@
+# External benchmark clones — NOT committed.
+# bench/run.py --external clones each project on demand using the
+# repo URL recorded in bench/fixtures/external/<name>/expected.json.
+# Ignoring everything keeps the repo size small and avoids
+# subtree-licence headaches.
+*
+!.gitignore

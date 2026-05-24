@@ -1,12 +1,12 @@
 # secscan benchmark report
 
-_secscan 0.9.0_
+_secscan 0.10.0_
 
 ## Summary
 
-- Overall recall: **20/20 (100.0%)**
+- Overall recall: **45/47 (95.7%)**
 - Total false positives (clean fixtures): **0**
-- Fixtures run: 7, skipped: 0
+- Fixtures run: 11, skipped: 0
 - ≥ best single tool (integration parity): **4/4 fixtures**
 
 ## Per-fixture detail
@@ -20,6 +20,10 @@ _secscan 0.9.0_
 | sast | javascript | 2 | 2 | 100.0% | 0 | semgrep | 2 | ✅ |
 | sast | python | 4 | 4 | 100.0% | 0 | semgrep | 7 | ✅ |
 | dast | juice-shop | 5 | 5 | 100.0% | 0 | zap-baseline | — | — |
+| dast | webgoat | 6 | 6 | 100.0% | 0 | zap-baseline | — | — |
+| external/secrets | gitleaks-corpus | 2 | 2 | 100.0% | 0 | gitleaks (own corpus) | — | — |
+| external/sast | nodegoat | 10 | 8 | 80.0% | 0 | — | — | — |
+| external/sast | pygoat | 9 | 9 | 100.0% | 0 | — | — | — |
 
 ## Methodology notes
 

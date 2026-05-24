@@ -65,6 +65,13 @@ DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
     "p/javascript",
     "p/typescript",
     "p/owasp-top-ten",
+    # Phase 2-I (external-bench): the OWASP NodeGoat measurement
+    # surfaced that ``p/expressjs`` reliably catches additional
+    # CWE-522 (insufficient credentials protection in express
+    # cookie/session config) and CWE-601 (open redirect) cases
+    # that the language-only packs miss. Zero false positives on
+    # the curated ``safe_*`` Python/JS fixtures.
+    "p/expressjs",
 )
 VALID_UNKNOWN_POLICIES = frozenset({"warn", "fail", "ignore"})
 

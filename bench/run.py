@@ -43,6 +43,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_DIR = REPO_ROOT / "bench"
 SAFE_FIXTURE_ROOT = (BENCH_DIR / "fixtures").resolve()
+EXTERNAL_CLONE_ROOT = (BENCH_DIR / "external").resolve()
 
 
 class BenchError(RuntimeError):
@@ -54,23 +55,39 @@ class BenchError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def _assert_under_fixture_root(p: Path) -> Path:
-    """Resolve ``p`` and require it to live under SAFE_FIXTURE_ROOT.
+def _assert_under_safe_root(p: Path, *, allow_external: bool = False) -> Path:
+    """Resolve ``p`` and require it to live under one of the two
+    bench-trusted roots:
 
-    Defense in depth against any future caller passing an arbitrary
-    path. Also rejects paths whose string form starts with ``-`` so a
-    fixture name cannot masquerade as a CLI flag on the secscan side.
+    - ``SAFE_FIXTURE_ROOT`` (``bench/fixtures``): always allowed.
+    - ``EXTERNAL_CLONE_ROOT`` (``bench/external``): allowed only when
+      ``allow_external=True`` (caller opted in for the external-
+      benchmark code path).
+
+    Defence in depth against any future caller passing an arbitrary
+    path. Also rejects paths whose string form starts with ``-`` so
+    a fixture name cannot masquerade as a CLI flag on the secscan
+    side.
     """
     resolved = p.resolve()
-    if not resolved.is_relative_to(SAFE_FIXTURE_ROOT):
-        raise BenchError(
-            f"refusing to use fixture path outside bench/fixtures: {p}"
-        )
-    # Forward-slash form so the check doesn't depend on OS separator.
+    inside_fixtures = resolved.is_relative_to(SAFE_FIXTURE_ROOT)
+    inside_external = allow_external and resolved.is_relative_to(
+        EXTERNAL_CLONE_ROOT
+    )
+    if not (inside_fixtures or inside_external):
+        roots = "bench/fixtures"
+        if allow_external:
+            roots += " or bench/external"
+        raise BenchError(f"refusing to use path outside {roots}: {p}")
     posix = resolved.as_posix()
     if posix.startswith("-") or "/-" in posix:
-        raise BenchError(f"refusing to use fixture path with a leading '-': {p}")
+        raise BenchError(f"refusing to use path with a leading '-': {p}")
     return resolved
+
+
+def _assert_under_fixture_root(p: Path) -> Path:
+    """Back-compat wrapper — only allows the curated fixture root."""
+    return _assert_under_safe_root(p, allow_external=False)
 
 
 # ---------------------------------------------------------------------------
@@ -244,16 +261,26 @@ class FixtureResult:
 
 
 def _run_secscan_scan(
-    scanner: str, fixture_path: Path, *, extra_args: list[str] | None = None
+    scanner: str,
+    fixture_path: Path,
+    *,
+    extra_args: list[str] | None = None,
+    allow_external: bool = False,
 ) -> dict[str, Any]:
     """Invoke `secscan <scanner>` against ``fixture_path``, return JSON.
 
-    Codex pin: ``fixture_path`` is validated to be under
-    SAFE_FIXTURE_ROOT before we ever build the argv, and the
+    Codex pin: ``fixture_path`` is validated to be under one of the
+    bench-trusted roots before we ever build the argv, and the
     RESOLVED (canonical) form returned by the validator — not the
     caller-supplied input — is what lands in the subprocess argv.
+
+    ``allow_external=True`` widens the gate to also accept paths
+    under ``bench/external/`` (Phase 2-I third-party benchmarks);
+    callers handling curated fixtures must leave it False.
     """
-    fixture_path = _assert_under_fixture_root(fixture_path)
+    fixture_path = _assert_under_safe_root(
+        fixture_path, allow_external=allow_external
+    )
     argv = [
         "secscan",
         scanner,
@@ -616,8 +643,251 @@ def _pick_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _bench_dast() -> FixtureResult:
-    fixture_dir = SAFE_FIXTURE_ROOT / "dast" / "juice-shop"
+_TRUSTED_EXTERNAL_REPOS = frozenset(
+    {
+        "https://github.com/OWASP/NodeGoat",
+        "https://github.com/adeyosemanputra/pygoat",
+        "https://github.com/gitleaks/gitleaks",
+    }
+)
+
+
+def _bench_external(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-I dispatcher: SAST → ``_bench_external_sast``,
+    secrets → ``_bench_external_secrets``."""
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    scanner = expected.get("scanner", "sast")
+    if scanner == "secrets":
+        return _bench_external_secrets(fixture_dir)
+    return _bench_external_sast(fixture_dir)
+
+
+def _bench_external_secrets(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-I: measure secscan secrets against the gitleaks
+    project's own ``testdata/`` corpus. Recall = unique rule IDs
+    secscan emits that are in expected_rule_ids.
+    """
+    expected = _expected(fixture_dir)
+    repo = expected.get("repo", "")
+    if repo not in _TRUSTED_EXTERNAL_REPOS:
+        return FixtureResult(
+            scanner="external/secrets",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=f"repo {repo!r} not on the external allowlist",
+        )
+    if shutil.which("gitleaks") is None:
+        return FixtureResult(
+            scanner="external/secrets",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="gitleaks not installed",
+        )
+    clone_dir = EXTERNAL_CLONE_ROOT / fixture_dir.name
+    if not clone_dir.is_dir():
+        clone_res = _run(
+            ["git", "clone", "--depth", "1", "--", repo, str(clone_dir)],
+            timeout=300,
+        )
+        if clone_res.returncode != 0:
+            return FixtureResult(
+                scanner="external/secrets",
+                fixture_name=fixture_dir.name,
+                expected_count=0,
+                detected_count=0,
+                skipped_reason=(
+                    "git clone failed: "
+                    + clone_res.stderr.decode("utf-8", errors="replace")[:120]
+                ),
+            )
+    scan_dir = clone_dir
+    subdir = expected.get("subdir", "")
+    if subdir:
+        scan_dir = (clone_dir / subdir).resolve()
+        if not scan_dir.is_relative_to(EXTERNAL_CLONE_ROOT) or not scan_dir.is_dir():
+            return FixtureResult(
+                scanner="external/secrets",
+                fixture_name=fixture_dir.name,
+                expected_count=0,
+                detected_count=0,
+                skipped_reason=f"subdir {subdir!r} resolved outside clone",
+            )
+    expected_ids = list(expected.get("expected_rule_ids", []))
+    payload = _run_secscan_scan("secrets", scan_dir, allow_external=True)
+    findings = payload.get("findings", [])
+    seen_ids = {f.get("rule_id", "") for f in findings}
+    detected = sum(1 for rid in expected_ids if rid in seen_ids)
+    return FixtureResult(
+        scanner="external/secrets",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_ids),
+        detected_count=detected,
+        raw_finding_count=len(findings),
+        comparison_tool="gitleaks (own corpus)",
+    )
+
+
+def _bench_external_sast(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-I: measure secscan SAST on a third-party benchmark.
+
+    The benchmark project itself is cloned on demand under
+    ``bench/external/<name>/`` (gitignored). Recall is computed by
+    expected CWE category: a CWE counts as detected iff at least
+    one secscan finding emitted that CWE. This is the out-of-sample
+    number — unlike the curated fixtures we author, this measures
+    secscan on code written by someone else, with no foreknowledge
+    of our rule set.
+
+    Codex Phase 2-I diff review tightenings (anticipated):
+    - Repo URL must be on ``_TRUSTED_EXTERNAL_REPOS`` allowlist so
+      a malicious PR cannot edit expected.json to clone arbitrary
+      code into the bench tree.
+    - Clone path stays under EXTERNAL_CLONE_ROOT (defence in depth).
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    repo = expected.get("repo", "")
+    scanner = expected.get("scanner", "sast")
+    # Codex Phase 2-I diff review: ``repo`` MUST be a string; a
+    # non-string (json null, integer, list) reaching the
+    # ``in _TRUSTED_EXTERNAL_REPOS`` check would compare cleanly
+    # but be a sign of a malformed expected.json — surface it
+    # loudly rather than skipping silently.
+    if not isinstance(repo, str):
+        return FixtureResult(
+            scanner=f"external/{scanner}",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=(
+                f"expected.json#repo must be a string; got "
+                f"{type(repo).__name__}"
+            ),
+        )
+    if repo not in _TRUSTED_EXTERNAL_REPOS:
+        return FixtureResult(
+            scanner=f"external/{scanner}",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=(
+                f"repo {repo!r} not on the external benchmark allowlist; "
+                "add to _TRUSTED_EXTERNAL_REPOS to opt in"
+            ),
+        )
+    clone_dir = EXTERNAL_CLONE_ROOT / fixture_dir.name
+    if not clone_dir.is_dir():
+        # Clone-on-demand. Shallow clone keeps disk usage tiny.
+        clone_res = _run(
+            ["git", "clone", "--depth", "1", "--", repo, str(clone_dir)],
+            timeout=300,
+        )
+        if clone_res.returncode != 0:
+            return FixtureResult(
+                scanner=f"external/{scanner}",
+                fixture_name=fixture_dir.name,
+                expected_count=0,
+                detected_count=0,
+                skipped_reason=(
+                    f"git clone failed: "
+                    f"{clone_res.stderr.decode('utf-8', errors='replace')[:120]}"
+                ),
+            )
+    else:
+        # Codex Phase 2-I diff review: an existing clone could
+        # have been tampered with (e.g. ``git remote set-url`` to
+        # an attacker repo). Verify the remote URL matches the
+        # expected one before scanning. Mismatches surface as
+        # SKIPPED with a clear message; the operator can ``rm -rf``
+        # the clone to force a re-clone from the trusted repo.
+        remote_res = _run(
+            ["git", "-C", str(clone_dir), "remote", "get-url", "origin"],
+            timeout=30,
+        )
+        actual_remote = remote_res.stdout.decode("utf-8", errors="replace").strip()
+        # Normalise the trailing ``.git`` if any — github clones
+        # are written as ``...NodeGoat.git`` in remote but the
+        # allowlist uses the user-facing URL.
+        normalised = actual_remote.rstrip("/").removesuffix(".git")
+        if normalised != repo:
+            return FixtureResult(
+                scanner=f"external/{scanner}",
+                fixture_name=fixture_dir.name,
+                expected_count=0,
+                detected_count=0,
+                skipped_reason=(
+                    f"clone remote {actual_remote!r} does not match "
+                    f"expected {repo!r}; rm -rf the clone to refresh"
+                ),
+            )
+    # Defence in depth: clone_dir must live under EXTERNAL_CLONE_ROOT.
+    if not clone_dir.resolve().is_relative_to(EXTERNAL_CLONE_ROOT):
+        return FixtureResult(
+            scanner=f"external/{scanner}",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="clone dir escaped EXTERNAL_CLONE_ROOT",
+        )
+    expected_entries = expected.get("expected_cwes", [])
+    payload = _run_secscan_scan(scanner, clone_dir, allow_external=True)
+    findings = payload.get("findings", [])
+    detected_set: set[str] = set()
+    for f in findings:
+        cwe = f.get("cwe") or ""
+        head = cwe.split(":", 1)[0].strip()
+        if head:
+            detected_set.add(head)
+    # Phase 2-I refinement: each expected entry may carry an
+    # ``aliases`` list of CWE codes that count as equivalent
+    # (e.g. CWE-89 ↔ CWE-943 for SQL vs NoSQL — same class,
+    # different category code).
+    #
+    # Codex Phase 2-I diff review: matching is "consumption-based"
+    # so a single detected CWE cannot satisfy multiple expected
+    # entries. The ``consumed`` set tracks which detected CWE
+    # codes have already counted toward an expected entry.
+    detected = 0
+    consumed: set[str] = set()
+    for entry in expected_entries:
+        primary = entry.get("cwe", "")
+        aliases = entry.get("aliases", []) or []
+        for candidate in (primary, *aliases):
+            if candidate in detected_set and candidate not in consumed:
+                detected += 1
+                consumed.add(candidate)
+                break
+    return FixtureResult(
+        scanner=f"external/{scanner}",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_entries),
+        detected_count=detected,
+        raw_finding_count=len(findings),
+    )
+
+
+def _bench_dast_all() -> list[FixtureResult]:
+    """Iterate every fixture under ``bench/fixtures/dast/`` and run
+    DAST against each. Phase 2-I added a second fixture (WebGoat)
+    alongside the original Juice Shop, so the runner became plural.
+    """
+    dast_root = SAFE_FIXTURE_ROOT / "dast"
+    if not dast_root.is_dir():
+        return []
+    results: list[FixtureResult] = []
+    for sub in sorted(dast_root.iterdir()):
+        if not sub.is_dir():
+            continue
+        if not (sub / "expected.json").exists():
+            continue
+        results.append(_bench_dast(sub))
+    return results
+
+
+def _bench_dast(fixture_dir: Path) -> FixtureResult:
     if not fixture_dir.exists() or not (fixture_dir / "expected.json").exists():
         return FixtureResult(
             scanner="dast",
@@ -639,19 +909,28 @@ def _bench_dast() -> FixtureResult:
             skipped_reason="docker not installed",
         )
 
+    fixture_name = fixture_dir.name
     expected = _expected(fixture_dir)
     pinning = expected.get("image_pinning", {})
-    juice_shop_image = pinning.get("juice_shop", "")
     zap_image = pinning.get("zap", "")
     expected_helper = pinning.get("helper", "")
-    if not juice_shop_image or not zap_image:
+    # The Juice Shop fixture uses ``juice_shop`` as the key; the
+    # WebGoat fixture (Phase 2-I) also stores its image under
+    # ``juice_shop`` for backwards compatibility, then declares
+    # ``container_config.container_port`` / ``.url_path`` so the
+    # bench can swap targets without renaming keys.
+    target_image = pinning.get("juice_shop", "")
+    if not target_image or not zap_image:
         return FixtureResult(
             scanner="dast",
-            fixture_name="juice-shop",
+            fixture_name=fixture_name,
             expected_count=0,
             detected_count=0,
             skipped_reason="image_pinning missing from expected.json",
         )
+    cc = expected.get("container_config", {})
+    container_port = int(cc.get("container_port", 3000))
+    url_path = cc.get("url_path", "/")
     # Codex Phase 2-H diff review: assert the expected.json helper
     # digest matches the code constant. Drift means the test corpus
     # and the production helper diverged — surface it loudly.
@@ -670,17 +949,12 @@ def _bench_dast() -> FixtureResult:
                 ),
             )
 
-    # Codex Phase 2-H diff review: randomize the container name so a
-    # second bench run (or a parallel one) doesn't collide on the
-    # fixed ``secscan-bench-juiceshop`` literal. Also pick a free
-    # port so the bench works alongside any other service the
-    # operator has running.
-    container_name = f"secscan-bench-juiceshop-{_secrets.token_hex(4)}"
+    container_name = f"secscan-bench-{fixture_name}-{_secrets.token_hex(4)}"
     host_port = _pick_free_port()
     expected_findings = expected.get("expected_findings", [])
     container_started = False
     try:
-        # 1. Start Juice Shop in the background.
+        # 1. Start the target container in the background.
         start = _run(
             [
                 "docker",
@@ -690,30 +964,30 @@ def _bench_dast() -> FixtureResult:
                 "--name",
                 container_name,
                 "-p",
-                f"127.0.0.1:{host_port}:3000",
+                f"127.0.0.1:{host_port}:{container_port}",
                 "--",
-                juice_shop_image,
+                target_image,
             ],
             timeout=180,
         )
         if start.returncode != 0:
             return FixtureResult(
                 scanner="dast",
-                fixture_name="juice-shop",
+                fixture_name=fixture_name,
                 expected_count=len(expected_findings),
                 detected_count=0,
                 skipped_reason=(
-                    f"juice-shop start failed: "
+                    f"{fixture_name} start failed: "
                     f"{start.stderr.decode('utf-8', errors='replace')[:120]}"
                 ),
             )
         container_started = True
 
-        # 2. Wait for Juice Shop to respond.
+        # 2. Wait for the target to respond.
         import socket
         import time
 
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
         ready = False
         while time.monotonic() < deadline:
             try:
@@ -725,20 +999,18 @@ def _bench_dast() -> FixtureResult:
         if not ready:
             return FixtureResult(
                 scanner="dast",
-                fixture_name="juice-shop",
+                fixture_name=fixture_name,
                 expected_count=len(expected_findings),
                 detected_count=0,
-                skipped_reason="juice-shop did not start within 60s",
+                skipped_reason=f"{fixture_name} did not start within 120s",
             )
 
-        # 3. Run secscan dast. The ZAP container reaches the host's
-        # mapped port via ``host.docker.internal`` (works on
-        # colima/Docker Desktop; native Linux has its own analogue).
+        # 3. Run secscan dast.
         argv = [
             "secscan",
             "dast",
             "--target",
-            f"http://host.docker.internal:{host_port}/",
+            f"http://host.docker.internal:{host_port}{url_path}",
             "--zap-image",
             zap_image,
             "--format",
@@ -753,7 +1025,7 @@ def _bench_dast() -> FixtureResult:
         if not result.stdout:
             return FixtureResult(
                 scanner="dast",
-                fixture_name="juice-shop",
+                fixture_name=fixture_name,
                 expected_count=len(expected_findings),
                 detected_count=0,
                 skipped_reason=(
@@ -772,20 +1044,16 @@ def _bench_dast() -> FixtureResult:
 
         return FixtureResult(
             scanner="dast",
-            fixture_name="juice-shop",
+            fixture_name=fixture_name,
             expected_count=len(expected_findings),
             detected_count=detected,
             raw_finding_count=len(findings),
             comparison_tool="zap-baseline",
         )
     finally:
-        # 5. Stop the Juice Shop container only if we successfully
-        # started it. Codex Phase 2-H diff review: avoid spurious
-        # ``Error: No such container`` warnings on the start-failure
-        # path.
         if container_started:
             _run(
-                ["docker", "stop", "--time", "5", container_name], timeout=30
+                ["docker", "stop", "--timeout", "5", container_name], timeout=30
             )
 
 
@@ -794,7 +1062,9 @@ def _bench_dast() -> FixtureResult:
 # ---------------------------------------------------------------------------
 
 
-def run_all(*, scanners: set[str], include_dast: bool) -> list[FixtureResult]:
+def run_all(
+    *, scanners: set[str], include_dast: bool, include_external: bool
+) -> list[FixtureResult]:
     results: list[FixtureResult] = []
     if "secrets" in scanners:
         _verify_secret_manifest()
@@ -819,7 +1089,16 @@ def run_all(*, scanners: set[str], include_dast: bool) -> list[FixtureResult]:
                 continue
             results.append(_bench_sast(sub))
     if include_dast:
-        results.append(_bench_dast())
+        results.extend(_bench_dast_all())
+    if include_external:
+        external_root = SAFE_FIXTURE_ROOT / "external"
+        if external_root.is_dir():
+            for sub in sorted(external_root.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_external(sub))
     return results
 
 
@@ -954,6 +1233,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dast", action="store_true", help="include DAST")
     parser.add_argument(
+        "--external",
+        action="store_true",
+        help=(
+            "include third-party benchmarks (OWASP NodeGoat, PyGoat, ...). "
+            "Clones each repo to bench/external/ on demand."
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=str(BENCH_DIR / "report.md"),
         help="Markdown output path",
@@ -966,7 +1253,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     scanners = {s.strip() for s in args.only.split(",") if s.strip()}
     try:
-        results = run_all(scanners=scanners, include_dast=args.dast)
+        results = run_all(
+            scanners=scanners,
+            include_dast=args.dast,
+            include_external=args.external,
+        )
     except BenchError as exc:
         sys.stderr.write(f"bench: {exc}\n")
         return 2

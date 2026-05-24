@@ -1,0 +1,56 @@
+{
+  "tool_under_test": "secscan dast",
+  "comparison_tool": "zap-baseline.py (direct)",
+  "target": "http://host.docker.internal:<port>/WebGoat/",
+  "advisory_db_snapshot": "2026-05-24",
+  "image_pinning": {
+    "juice_shop": "webgoat/webgoat@sha256:3101bd9e7bcfe122d7ef91e690ef3720de36cc4e86b3d06763a1ddf2e2751a4b",
+    "zap": "zaproxy/zap-stable@sha256:8770b23f9e8b49038f413cb2b10c58c901e5b6717be221a22b1bcab5c9771b8a",
+    "helper": "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+  },
+  "container_config": {
+    "image_repo_label": "webgoat",
+    "container_port": 8080,
+    "url_path": "/WebGoat/"
+  },
+  "notes": [
+    "OWASP WebGoat is a deliberately-vulnerable Java web app, a peer",
+    "to Juice Shop. Running ZAP baseline against the front page",
+    "reliably surfaces a stable set of HTTP-layer header / cookie",
+    "alerts. This fixture validates that the secscan DAST path",
+    "generalizes beyond Juice Shop — a second 3rd-party target.",
+    "Match logic: secscan Finding.rule_id == ZAP pluginid."
+  ],
+  "expected_findings": [
+    {
+      "pluginid": "10038",
+      "name": "Content Security Policy (CSP) Header Not Set",
+      "min_severity": "MEDIUM"
+    },
+    {
+      "pluginid": "10202",
+      "name": "Absence of Anti-CSRF Tokens",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "10020",
+      "name": "X-Frame-Options Header",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "10021",
+      "name": "X-Content-Type-Options Header Missing",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "10054",
+      "name": "Cookie without SameSite Attribute",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "90004",
+      "name": "Cross-Origin-Embedder-Policy Header Missing or Invalid",
+      "min_severity": "LOW"
+    }
+  ]
+}

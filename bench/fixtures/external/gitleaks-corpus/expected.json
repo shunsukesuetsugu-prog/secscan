@@ -1,0 +1,22 @@
+{
+  "name": "gitleaks own testdata corpus",
+  "repo": "https://github.com/gitleaks/gitleaks",
+  "scanner": "secrets",
+  "subdir": "testdata/repos/nogit",
+  "advisory_db_snapshot": "2026-05-24",
+  "notes": [
+    "gitleaks ships a small ``testdata/`` corpus of source files",
+    "containing credential-shaped strings the project's own rules",
+    "are expected to flag. Running secscan secrets against the same",
+    "directory and matching the rule_id set is a parity check: does",
+    "secscan's integration layer surface what gitleaks itself surfaces?",
+    "Match logic: count of unique (file, rule_id) tuples in",
+    "secscan output >= count emitted by gitleaks direct on the same",
+    "directory at the same gitleaks version. Recall here doubles as",
+    "a regression test for the gitleaks-tempfile fix from Phase 2-F."
+  ],
+  "expected_rule_ids": [
+    "aws-access-token",
+    "generic-api-key"
+  ]
+}

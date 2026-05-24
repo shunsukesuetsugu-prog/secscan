@@ -10,5 +10,5 @@
     {"file": "cwe78_cmd_injection.js", "cwe": "CWE-78", "min_severity": "MEDIUM"},
     {"file": "cwe502_eval.js", "cwe": "CWE-95", "min_severity": "MEDIUM"}
   ],
-  "expected_clean": ["safe_exec.js"]
+  "expected_clean": ["safe_exec.js", "safe_mongo_where.js"]
 }

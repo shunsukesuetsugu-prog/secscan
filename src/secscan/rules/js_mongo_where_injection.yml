@@ -1,0 +1,46 @@
+# secscan bundled rule: MongoDB ``$where`` operator with template-
+# string interpolation.
+#
+# Phase 2-I: NodeGoat's A1 lab uses
+#
+#   {$where: `this.userId == ${parsedUserId}`}
+#
+# which is the textbook NoSQL injection pattern (CWE-943).
+# Public semgrep registry packs (p/javascript, p/expressjs,
+# p/nodejs, p/default) do NOT cover this pattern, so secscan
+# ships its own.
+#
+# False-positive surface: the rule fires only when the value of
+# the ``$where`` key is a template literal that contains at least
+# one ``${...}`` substitution. A static ``$where: 'this.x == 1'``
+# is NOT flagged.
+
+rules:
+  - id: secscan-js-mongo-where-template-injection
+    message: |
+      MongoDB ``$where`` operator with a template-literal value
+      containing user input. The expression is evaluated as
+      JavaScript by the database, so any interpolated value
+      becomes executable — CWE-943: Improper Neutralization of
+      Special Elements in Data Query Logic. Use the MongoDB
+      query operators (``$eq``, ``$gt``, etc.) with parameterised
+      values instead of ``$where`` + string interpolation.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-943: Improper Neutralization of Special Elements in Data Query Logic"
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      category: security
+      references:
+        - https://owasp.org/www-community/Injection_Flaws
+        - https://www.mongodb.com/docs/manual/reference/operator/query/where/
+    pattern-either:
+      # Object-literal property form
+      - patterns:
+          - pattern: |
+              { ..., $where: `...${$X}...`, ... }
+      # Variable assignment form: ``return {$where: \`...\`}``
+      # caught by the literal-form rule above; semgrep matches
+      # the object literal regardless of its enclosing return /
+      # assignment / argument context.

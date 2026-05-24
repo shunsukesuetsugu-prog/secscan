@@ -324,18 +324,40 @@ corpus secscan detects and how it compares to single-tool baselines.
 Latest results on this machine (re-run locally for an up-to-date
 snapshot; see `bench/report.md` for the full table):
 
-| Scanner | Fixture | Expected | Detected | Recall | FP | vs single tool |
-|---|---|---|---|---|---|---|
-| deps    | npm-vulnerable | 2 | 2 | **100%** | 0 | = npm audit ✅ |
-| deps    | pip-vulnerable | 3 | 3 | **100%** | 0 | = pip-audit (deduped) ✅ |
-| sast    | python | 4 | 4 | **100%** | 0 | ≥ semgrep ✅ |
-| sast    | javascript | 2 | 2 | **100%** | 0 | = semgrep ✅ |
-| secrets | synthetic | 4 | 4 | **100%** | 0 | = gitleaks ✅ |
-| dast    | juice-shop | 5 | 5 | **100%** | 0 | = zap-baseline ✅ |
+### Curated fixtures (in-sample — we author these, so 100% is the
+expected ceiling)
 
-**Overall recall: 20/20 = 100%**, false positives: **0**, ≥ best
-single tool: **4/4**. Run with `--dast` to include the OWASP Juice
-Shop measurement (requires docker; adds 2-4 minutes).
+| Scanner | Fixture | Recall | FP | vs single tool |
+|---|---|---|---|---|
+| deps    | npm-vulnerable | 100% | 0 | = npm audit ✅ |
+| deps    | pip-vulnerable | 100% | 0 | = pip-audit (deduped) ✅ |
+| sast    | python | 100% | 0 | ≥ semgrep ✅ |
+| sast    | javascript | 100% | 0 | = semgrep ✅ |
+| secrets | synthetic | 100% | 0 | = gitleaks ✅ |
+| dast    | juice-shop | 100% | 0 | = zap-baseline ✅ |
+
+### External benchmarks (third-party, out-of-sample — added in
+Phase 2-I to surface over-fit)
+
+| Scanner | Fixture | Recall | FP | Notes |
+|---|---|---|---|---|
+| dast | webgoat | 100% (6/6) | 0 | second DAST target validates lifecycle generalises |
+| external/secrets | gitleaks-corpus | 100% (2/2) | 0 | parity with gitleaks on its own testdata |
+| external/sast | pygoat | 100% (9/9) | 0 | Python OWASP Top 10 |
+| external/sast | nodegoat | 80% (8/10) | 0 | JS XSS (.ejs templates) + broken auth still escape |
+
+**Overall: 45/47 = 95.7%** across **11 benchmarks**, false
+positives: **0**, ≥ best single tool: **4/4**. Run with
+`--dast --external` to include all third-party benchmarks
+(requires docker + git; adds 5-10 minutes for the
+clone-and-scan cycle).
+
+The 80% on NodeGoat is the headline honest number — secscan
+catches 8 of 10 expected CWE categories on a benchmark we did
+NOT design or tune to. The two misses (CWE-79 in .ejs
+templates, CWE-287 broken authentication) reflect genuine
+limits of static analysis on those patterns, not gaps in the
+scanner integration layer.
 
 Phase 2-F + 2-G tuning (post-initial benchmark) lifted recall
 from 54.5% → 86.7% → **100%** by:
@@ -425,7 +447,8 @@ specific Codex review iteration that motivated each invariant.
 | 2-F   | tune defaults to improve bench recall (54.5% → 86.7%) | done (v0.7.0)        |
 | 2-G   | bundled secscan semgrep rules (recall 86.7% → 100%) | done (v0.8.0)          |
 | 2-H   | DAST 自動計測 (Juice Shop + docker volume lifecycle) | done (v0.9.0)         |
-| 2-I+  | broader fixture corpus, multi-target DAST profiles  | future                 |
+| 2-I   | 外部 benchmark (NodeGoat / PyGoat / WebGoat / gitleaks corpus) | done (v0.10.0) |
+| 2-J+  | broader real-codebase FP corpus, additional language packs | future          |
 
 ## Development
 

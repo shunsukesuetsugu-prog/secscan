@@ -1,0 +1,39 @@
+{
+  "name": "OWASP NodeGoat",
+  "repo": "https://github.com/OWASP/NodeGoat",
+  "scanner": "sast",
+  "language": "javascript",
+  "advisory_db_snapshot": "2026-05-24",
+  "notes": [
+    "NodeGoat is the OWASP project for teaching the OWASP Top 10 in",
+    "Node.js. The README maps each lab (A1..A10) to specific CWE",
+    "categories. The expected_cwes set below is the subset that a",
+    "general-purpose static analyzer should reach with default rules.",
+    "Match logic: a CWE entry counts as 'detected' iff secscan emits",
+    "at least one finding with that CWE in its location output.",
+    "This is the third-party / out-of-sample number — recall here",
+    "tells us how well secscan generalizes beyond the curated",
+    "fixtures we author ourselves (where we always hit 100%)."
+  ],
+  "expected_cwes": [
+    {
+      "cwe": "CWE-89",
+      "aliases": ["CWE-943"],
+      "topic": "A1 SQL/NoSQL Injection (NodeGoat uses MongoDB ⇒ CWE-943 is the precise category)"
+    },
+    {"cwe": "CWE-95", "topic": "A1 Code Injection (eval)"},
+    {"cwe": "CWE-79", "topic": "A7 XSS"},
+    {"cwe": "CWE-287", "topic": "A2 Broken Authentication"},
+    {"cwe": "CWE-319", "topic": "A3 Cleartext Transmission"},
+    {"cwe": "CWE-352", "topic": "A8 CSRF / deserialization-adjacent"},
+    {"cwe": "CWE-522", "topic": "A2/A3 Insufficient Credentials Protection"},
+    {"cwe": "CWE-601", "topic": "A1 Open Redirect"},
+    {"cwe": "CWE-732", "topic": "A6 Incorrect Permission"},
+    {"cwe": "CWE-798", "topic": "A2 Hard-coded Credentials"}
+  ],
+  "out_of_scope_cwes": [
+    {"cwe": "CWE-611", "reason": "XXE; uncommon in Node.js default stack"},
+    {"cwe": "CWE-1104", "reason": "vulnerable components; deps scanner scope, not SAST"},
+    {"cwe": "CWE-778", "reason": "insufficient logging; hard to detect statically"}
+  ]
+}

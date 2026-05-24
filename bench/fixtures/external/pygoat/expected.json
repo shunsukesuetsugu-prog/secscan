@@ -1,0 +1,30 @@
+{
+  "name": "PyGoat",
+  "repo": "https://github.com/adeyosemanputra/pygoat",
+  "scanner": "sast",
+  "language": "python",
+  "advisory_db_snapshot": "2026-05-24",
+  "notes": [
+    "PyGoat is a Django app teaching the OWASP Top 10 in Python.",
+    "The expected_cwes set below is the subset that a general-",
+    "purpose static analyzer should reach with default rules.",
+    "Match logic: a CWE entry counts as 'detected' iff secscan",
+    "emits at least one finding with that CWE in its location",
+    "output."
+  ],
+  "expected_cwes": [
+    {"cwe": "CWE-78", "topic": "OS Command Injection"},
+    {"cwe": "CWE-79", "topic": "Cross-Site Scripting"},
+    {"cwe": "CWE-89", "topic": "SQL Injection"},
+    {"cwe": "CWE-95", "topic": "Code Injection (eval / exec)"},
+    {"cwe": "CWE-327", "topic": "Use of Broken / Risky Crypto"},
+    {"cwe": "CWE-352", "topic": "CSRF"},
+    {"cwe": "CWE-502", "topic": "Deserialization (pickle / yaml.load)"},
+    {"cwe": "CWE-614", "topic": "Sensitive Cookie Without Secure Flag"},
+    {"cwe": "CWE-798", "topic": "Hard-coded Credentials"}
+  ],
+  "out_of_scope_cwes": [
+    {"cwe": "CWE-1104", "reason": "vulnerable components; deps scanner scope"},
+    {"cwe": "CWE-269", "reason": "improper privilege; runtime, not static"}
+  ]
+}
