@@ -217,6 +217,26 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
         )
     if scanner_name == "secrets":
         return ScanConfig(timeout_seconds=config.secrets.timeout_seconds)
+    if scanner_name == "dast":
+        # Local import: the dast package is optional in test envs that
+        # don't have docker. Importing at module top would force every
+        # orchestrator invocation to pull in zap.py.
+        from .scanners.dast._pinned import DEFAULT_ZAP_IMAGE
+
+        dast = config.dast
+        image = dast.image.strip() or DEFAULT_ZAP_IMAGE
+        return ScanConfig(
+            timeout_seconds=dast.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    "target": dast.target,
+                    "image": image,
+                    "ajax_spider": dast.ajax_spider,
+                    "config_file": dast.config_file or None,
+                    "network_mode": dast.network_mode,
+                }
+            ),
+        )
     # Unknown scanner: pass defaults; orchestrator-internal contract.
     return ScanConfig()
 

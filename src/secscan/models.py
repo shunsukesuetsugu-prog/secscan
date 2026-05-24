@@ -123,6 +123,27 @@ class Finding:
     fix_version: str | None = None
     references: tuple[str, ...] = ()
     tool_version: str | None = None
+    fingerprint_aliases: tuple[str, ...] = ()
+    """Additional baseline-suppression keys for this finding.
+
+    Phase 2-D added DAST (OWASP ZAP) findings where the same vulnerability
+    is often reported twice by ZAP — once with ``param`` set (e.g. ``q``)
+    and once with ``param`` absent. The Codex 2nd review for Phase 2-D
+    flagged that splitting on ``param`` alone would double the baseline:
+    one ``baseline accept`` would not suppress the other report.
+
+    ``fingerprint_aliases`` solves this by letting a Finding declare
+    additional, coarser fingerprints (e.g. the same finding with
+    ``NO_PARAM``). ``baseline.apply_baseline`` matches a Finding when ANY
+    of (``fingerprint``, *aliases*) matches a baseline entry — so a
+    single ``baseline accept`` on either key suppresses both
+    representations of the same vulnerability.
+
+    Scanners that don't need this (deps, secrets, sast) leave it empty;
+    only DAST currently populates it. Order matters for stability:
+    aliases are emitted in coarsest-to-finest order so that audits and
+    SARIF "partial fingerprints" remain deterministic across runs.
+    """
     raw: dict[str, object] | None = field(default=None, hash=False, compare=False)
 
 

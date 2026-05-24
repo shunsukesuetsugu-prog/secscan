@@ -28,7 +28,7 @@ from pathlib import Path
 from . import __version__
 from .baseline import (
     BaselineError,
-    build_entry,
+    build_entries_for_accept,
     is_ci_environment,
     load_baseline,
     merge_entries,
@@ -44,12 +44,18 @@ from .orchestrator import run_scanners
 from .path_safety import PathSafetyError, resolve_scan_root
 from .runner import SubprocessCommandRunner
 from .scanners.base import Scanner
+from .scanners.dast import DastScanner
 from .scanners.deps_scanner import DepsScanner
 from .scanners.sast import SastScanner
 from .scanners.secrets import SecretsScanner
 
 # Registry of scanners available in this build.
-ALL_SCANNERS: list[type[Scanner]] = [SecretsScanner, DepsScanner, SastScanner]
+ALL_SCANNERS: list[type[Scanner]] = [
+    SecretsScanner,
+    DepsScanner,
+    SastScanner,
+    DastScanner,
+]
 """Currently-implemented Scanner classes.
 
 When a subcommand maps to a scanner NOT in this list (e.g. ``secscan deps``
@@ -85,8 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # secscan secrets / deps / sast / all — share flags.
-    for cmd in ("secrets", "deps", "sast", "all"):
+    # secscan secrets / deps / sast / dast / all — share flags.
+    for cmd in ("secrets", "deps", "sast", "dast", "all"):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
         _add_common_scan_args(sub)
         if cmd == "all":
@@ -95,7 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
                 action="append",
                 default=[],
                 metavar="SCANNER",
-                help="scanner to skip (repeatable). Choices: secrets, deps, sast.",
+                help="scanner to skip (repeatable). Choices: secrets, deps, sast, dast.",
             )
         if cmd == "sast":
             sub.add_argument(
@@ -110,6 +116,45 @@ def _build_parser() -> argparse.ArgumentParser:
                 "--allow-missing-lockfile",
                 action="store_true",
                 help="proceed even when a project has no lockfile.",
+            )
+        if cmd == "dast":
+            sub.add_argument(
+                "--target",
+                required=True,
+                metavar="URL",
+                help="DAST target URL (http:// or https://). Required.",
+            )
+            sub.add_argument(
+                "--zap-image",
+                default=None,
+                metavar="IMAGE",
+                help=(
+                    "OCI image reference (digest-pinned) for the OWASP ZAP "
+                    "container. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+            sub.add_argument(
+                "--ajax-spider",
+                action="store_true",
+                help="enable ZAP's AJAX spider (slower; needed for JS-heavy sites).",
+            )
+            sub.add_argument(
+                "--zap-config-file",
+                default=None,
+                metavar="PATH",
+                help=(
+                    "ZAP context file path INSIDE the container. The operator "
+                    "is responsible for mounting it (secscan does not add -v)."
+                ),
+            )
+            sub.add_argument(
+                "--zap-network",
+                choices=("bridge", "host"),
+                default=None,
+                help=(
+                    "docker --network mode (default: bridge). Use 'host' only "
+                    "when the target is reachable only on the host namespace."
+                ),
             )
 
     # secscan baseline …
@@ -253,10 +298,12 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
         return int(ExitCode.SCAN_ERROR)
 
     # For ``secscan all``, the user expects "every kind of check we know
-    # about" — secrets + deps + sast. If any of those is NOT registered,
-    # warn (and skip-list it) instead of silently running a subset and
-    # exiting 0. Explicitly skipped scanners (--skip / config.skip) do NOT
-    # count as "missing" — the user already acknowledged that gap.
+    # about" — secrets + deps + sast. DAST is intentionally NOT in this
+    # set: it's opt-in (per-deployment) and only runs when ``--target``
+    # is configured. If any non-DAST scanner is NOT registered, warn
+    # (and skip-list it) instead of silently running a subset and
+    # exiting 0. Explicitly skipped scanners (--skip / config.skip)
+    # do NOT count as "missing" — the user already acknowledged that gap.
     expected_all_scanners = {"secrets", "deps", "sast"}
     missing_for_all: tuple[str, ...] = ()
     if args.command == "all":
@@ -265,7 +312,12 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             sorted(expected_all_scanners - _REGISTERED_NAMES - user_skipped)
         )
 
-    scanners = [cls() for cls in ALL_SCANNERS]
+    # DAST runs only when a target is configured. For ``secscan dast``,
+    # the CLI flag is required (argparse enforces that). For ``secscan all``,
+    # DAST is excluded unless ``dast.target`` was set in config. We achieve
+    # this by filtering DastScanner OUT of the registered instances when
+    # the resolved config has no target.
+    scanners = _build_scanner_instances(config, command=args.command)
 
     runner = SubprocessCommandRunner()
     try:
@@ -385,7 +437,10 @@ def _baseline_accept(
         return int(ExitCode.SCAN_ERROR)
 
     # Re-run scanners on the scan root to discover current fingerprints.
-    scanners = [cls() for cls in ALL_SCANNERS]
+    # DAST is filtered out unless explicitly configured: baseline accept
+    # only re-runs the static analysis scanners (Codex 17th-style
+    # safeguard — a missing DAST target must not crash baseline accept).
+    scanners = _build_scanner_instances(config, command="baseline")
     runner = SubprocessCommandRunner()
     outcome = run_scanners(
         scanners,
@@ -428,12 +483,25 @@ def _baseline_accept(
 
     expiry_days = args.expiry_days or config.baseline.default_expiry_days
     accepted_by = os.environ.get("USER", "")
-    new_entries = tuple(
-        build_entry(
-            f, reason=args.reason, accepted_by=accepted_by, expiry_days=expiry_days
+    # ``build_entries_for_accept`` (vs ``build_entry``) expands DAST
+    # findings into their coarse alias entries too, so a single
+    # ``baseline accept --fingerprint <fine>`` suppresses the
+    # ``param``-less variant of the same advisory. Codex Phase-2-D
+    # diff review pinned this — without the expansion, "fine accept"
+    # silently leaves the coarse variant unsuppressed.
+    from .baseline import BaselineEntry as _BaselineEntry  # local alias
+
+    expanded: list[_BaselineEntry] = []
+    for f in selected:
+        expanded.extend(
+            build_entries_for_accept(
+                f,
+                reason=args.reason,
+                accepted_by=accepted_by,
+                expiry_days=expiry_days,
+            )
         )
-        for f in selected
-    )
+    new_entries = tuple(expanded)
 
     existing = load_baseline(config.baseline.path)
     merged = merge_entries(existing, new_entries, accepted_by=accepted_by)
@@ -497,6 +565,24 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
     if getattr(args, "allow_missing_lockfile", False):
         new = replace(new, deps=replace(new.deps, allow_missing_lockfile=True))
 
+    # DAST CLI overrides — only the ``dast`` subcommand defines these
+    # arguments, but ``getattr(..., None)`` lets us run a single block
+    # without per-command branching.
+    target = getattr(args, "target", None)
+    if isinstance(target, str) and target:
+        new = replace(new, dast=replace(new.dast, target=target))
+    zap_image = getattr(args, "zap_image", None)
+    if isinstance(zap_image, str) and zap_image:
+        new = replace(new, dast=replace(new.dast, image=zap_image))
+    if getattr(args, "ajax_spider", False):
+        new = replace(new, dast=replace(new.dast, ajax_spider=True))
+    zap_config_file = getattr(args, "zap_config_file", None)
+    if isinstance(zap_config_file, str) and zap_config_file:
+        new = replace(new, dast=replace(new.dast, config_file=zap_config_file))
+    zap_network = getattr(args, "zap_network", None)
+    if isinstance(zap_network, str) and zap_network:
+        new = replace(new, dast=replace(new.dast, network_mode=zap_network))
+
     if getattr(args, "no_baseline", False):
         # Easiest way to disable baseline: point it at a path that won't
         # exist. We do not mutate the file; we just opt out of loading.
@@ -506,6 +592,28 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
         )
 
     return new
+
+
+def _build_scanner_instances(
+    config: ProjectConfig, *, command: str
+) -> list[Scanner]:
+    """Instantiate the configured scanners.
+
+    DAST is filtered out when no target is configured. For the dedicated
+    ``dast`` subcommand the argparse layer already enforces ``--target``,
+    so by the time we reach here the resolved config has a target.
+
+    For ``secscan all``, DAST is included only if ``dast.target`` is set
+    in config (or has been overridden via flags), matching the Phase 2-D
+    design's "DAST is opt-in" invariant.
+    """
+    instances: list[Scanner] = []
+    target_configured = bool(config.dast.target.strip())
+    for cls in ALL_SCANNERS:
+        if cls.name == "dast" and not target_configured and command != "dast":
+            continue
+        instances.append(cls())
+    return instances
 
 
 def _should_use_color(args: argparse.Namespace, stream: object) -> bool:

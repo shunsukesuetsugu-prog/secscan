@@ -17,9 +17,10 @@ secscan all --path .
 | Subcommand | Tool wrapped         | What it checks                                      |
 | ---------- | -------------------- | --------------------------------------------------- |
 | `secrets`  | gitleaks v8+         | hard-coded API keys, tokens, credentials            |
-| `deps`     | npm / pnpm / pip-audit | declared dependencies with known CVEs/GHSAs       |
+| `deps`     | npm / pnpm / yarn / pip-audit | declared dependencies with known CVEs/GHSAs |
 | `sast`     | semgrep              | source-level vulnerability patterns                 |
-| `all`      | every registered scanner | secrets + deps + sast in one invocation         |
+| `dast`     | OWASP ZAP (Docker)   | live HTTP target probing (Phase 2-D)                |
+| `all`      | every registered scanner | secrets + deps + sast (and dast when `dast.target` is configured) |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -249,6 +250,68 @@ GitHub Actions example:
 Exit 1 → step fails. Exit 2 → step fails (and the log shows the
 `partial scan` warning so the operator knows why).
 
+## DAST (OWASP ZAP)
+
+The `dast` subcommand runs an OWASP ZAP baseline scan against a live
+HTTP target via Docker. It is **opt-in**: `secscan all` only includes
+DAST when `dast.target` is set in `.secscan.toml` (or `--target` was
+passed on the CLI).
+
+```sh
+# Smoke a staging deployment.
+secscan dast \
+  --target https://staging.example.com/ \
+  --zap-image zaproxy/zap-stable@sha256:<verified-digest> \
+  --format sarif --output zap.sarif
+```
+
+Required CLI flags / config:
+
+| Flag                  | Equivalent config key   | Purpose                                              |
+| --------------------- | ----------------------- | ---------------------------------------------------- |
+| `--target <URL>`      | `dast.target`           | HTTP/HTTPS URL to probe (mandatory).                 |
+| `--zap-image <ref>`   | `dast.image`            | OCI image ref **with `@sha256:` digest pinning**.    |
+| `--ajax-spider`       | `dast.ajax_spider`      | Enable ZAP's AJAX spider (slower; JS-heavy targets). |
+| `--zap-config-file`   | `dast.config_file`      | ZAP context file path **inside the container**.      |
+| `--zap-network`       | `dast.network_mode`     | `bridge` (default) or `host`.                        |
+
+Hard requirements baked into the implementation:
+
+- **Image digest pinning is mandatory.** An image without
+  `@sha256:<64 hex>` is rejected before docker is invoked, and a
+  leading `-` is also rejected to make argv injection structurally
+  impossible.
+- **Argv shape is fixed.** `docker run … -- <image> <cmd>` —
+  the `--` separator is always present so the image value cannot be
+  flag-interpreted under any future refactor.
+- **No host leakage in external output.** SARIF / JSON / text reports
+  emit a normalized relative URI `dast/<urlencoded-path>`; the target
+  host is never echoed into `location.uri`.
+- **`--cap-drop=ALL` + `--network=bridge` by default.** Operators can
+  opt into `--network=host` explicitly when targeting a service that
+  is only bound to the host namespace.
+- **Findings are deduped on `(pluginid, path, query-keys, param)`** and
+  carry a coarse `(pluginid, path)` alias, so a single
+  `baseline accept` suppresses both the `param`-bearing and
+  `param`-less variants of the same advisory.
+
+### ZAP image digest rotation
+
+The pinned default in
+`src/secscan/scanners/dast/_pinned.py` ships with an all-zero
+digest sentinel — the scanner will run, but Docker will refuse to
+pull the image. Operators are expected to pin a verified digest the
+first time they enable DAST:
+
+```sh
+docker pull zaproxy/zap-stable:2.15.0
+docker inspect --format='{{index .RepoDigests 0}}' zaproxy/zap-stable:2.15.0
+# zaproxy/zap-stable@sha256:<digest>
+```
+
+Set the verified digest under `[dast].image` in `.secscan.toml` (or
+pass it via `--zap-image`).
+
 ## Security posture
 
 A few invariants worth knowing about if you're auditing the tool itself:
@@ -291,12 +354,13 @@ specific Codex review iteration that motivated each invariant.
 | 2-A   | JSON / SARIF output                                | done (v0.2.0)           |
 | 2-B   | monorepo / workspaces (pnpm + npm)                 | done (v0.3.0)           |
 | 2-C   | uv per-member audit + Yarn Berry workspaces        | done (v0.4.0)           |
-| 2-D+  | DAST (OWASP ZAP)                                   | future                  |
+| 2-D   | DAST (OWASP ZAP, Docker)                           | done (v0.5.0)           |
+| 2-E+  | additional DAST profiles, plugin-discovery cache   | future                  |
 
 ## Development
 
 ```sh
-.venv/bin/pytest               # 354 unit tests + 2 integration (skipped without the binaries)
+.venv/bin/pytest               # 618 unit tests + 2 integration (skipped without the binaries)
 .venv/bin/ruff check src/ tests/
 .venv/bin/mypy --strict src/secscan
 ```

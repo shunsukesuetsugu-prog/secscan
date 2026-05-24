@@ -249,8 +249,17 @@ def apply_baseline(
     expired_seen: set[str] = set()
 
     for finding in findings:
-        key = (finding.fingerprint, finding.scanner, finding.rule_id)
-        entry = by_key.get(key)
+        # Phase 2-D / Codex 2nd review: DAST findings carry alias
+        # fingerprints (coarse + fine) so a single baseline accept on
+        # either granularity suppresses both representations. We try
+        # the primary fingerprint first (the one the user is most
+        # likely to see in reports), then any aliases in declared order.
+        entry: BaselineEntry | None = None
+        candidates: tuple[str, ...] = (finding.fingerprint, *finding.fingerprint_aliases)
+        for fp in candidates:
+            entry = by_key.get((fp, finding.scanner, finding.rule_id))
+            if entry is not None:
+                break
         if entry is None:
             kept.append(finding)
             continue
@@ -311,9 +320,14 @@ def build_entry(
     expiry_days: int,
     now: datetime | None = None,
 ) -> BaselineEntry:
-    """Build a BaselineEntry from a Finding.
+    """Build a primary BaselineEntry from a Finding.
 
     ``reason`` must be non-empty (also enforced by the parser).
+
+    Note: this returns ONLY the primary entry. For findings that carry
+    ``fingerprint_aliases`` (currently DAST), the
+    :func:`build_entries_for_accept` helper expands the alias set so
+    one ``baseline accept`` covers every variant.
     """
     if not reason.strip():
         raise BaselineError("reason must not be empty")
@@ -343,6 +357,69 @@ def build_entry(
         ecosystem=location.ecosystem if location else None,
         source_location=source_location,
     )
+
+
+def build_entries_for_accept(
+    finding: Finding,
+    *,
+    reason: str,
+    accepted_by: str,
+    expiry_days: int,
+    now: datetime | None = None,
+) -> tuple[BaselineEntry, ...]:
+    """Build every baseline entry needed to suppress a finding.
+
+    For most scanners this is a single-entry tuple matching the
+    fine-grained ``finding.fingerprint``. For findings that declare
+    ``fingerprint_aliases`` (Phase 2-D DAST: a coarse ``(pluginid,
+    path)`` alias alongside the fine ``(pluginid, path, query_keys,
+    param)`` primary), we also persist the coarse alias as its own
+    entry — Codex 2nd review's "fine-accept→coarse-suppress" property
+    only holds if BOTH keys are written.
+
+    All emitted entries share the same ``reason``, ``accepted_by``,
+    and ``expires_at`` so the audit trail stays coherent: an operator
+    reading the baseline sees the same justification on every variant.
+    """
+    primary = build_entry(
+        finding,
+        reason=reason,
+        accepted_by=accepted_by,
+        expiry_days=expiry_days,
+        now=now,
+    )
+    entries: list[BaselineEntry] = [primary]
+    # Deduplicate against the primary fingerprint to avoid emitting
+    # two entries with the same fingerprint key (load/save would dedupe
+    # them downstream, but emitting them in the first place would
+    # confuse audit logs).
+    seen: set[str] = {primary.fingerprint}
+    for alias_fp in finding.fingerprint_aliases:
+        if not alias_fp or alias_fp in seen:
+            continue
+        seen.add(alias_fp)
+        entries.append(
+            BaselineEntry(
+                fingerprint=alias_fp,
+                scanner=primary.scanner,
+                rule_id=primary.rule_id,
+                reason=primary.reason,
+                accepted_by=primary.accepted_by,
+                added_at=primary.added_at,
+                expires_at=primary.expires_at,
+                secscan_version=primary.secscan_version,
+                title=primary.title,
+                # raw_fingerprint belongs to the tool's own primary
+                # identity — copying it onto coarse aliases would
+                # falsely claim ZAP emitted that exact alias as
+                # a stable id. Leave it None on aliases.
+                raw_fingerprint=None,
+                package=primary.package,
+                ecosystem=primary.ecosystem,
+                source_location=primary.source_location,
+            )
+        )
+    return tuple(entries)
 
 
 def merge_entries(

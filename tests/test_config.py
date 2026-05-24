@@ -181,8 +181,10 @@ def test_invalid_unknown_policy_value_rejected(tmp_path: Path) -> None:
 
 
 def test_skip_unknown_scanner_rejected(tmp_path: Path) -> None:
+    # ``dast`` is registered as of Phase 2-D; use a truly-unknown name
+    # so the test still exercises the rejection path.
     with pytest.raises(ConfigError, match="unknown scanner"):
-        load_config_file(_write(tmp_path, "[scan]\nskip = ['dast']\n"))
+        load_config_file(_write(tmp_path, "[scan]\nskip = ['nosuchscanner']\n"))
 
 
 def test_scan_timeout_seconds_is_rejected(tmp_path: Path) -> None:
@@ -223,3 +225,66 @@ def test_severity_overrides_rejects_none(tmp_path: Path) -> None:
                 "[severity_overrides.secrets]\n\"x\" = 'none'\n",
             )
         )
+
+
+# --- DAST section (Phase 2-D) ---------------------------------------------
+
+
+def test_dast_section_defaults_when_absent(tmp_path: Path) -> None:
+    cfg = load_config_file(_write(tmp_path, "[scan]\nfail_on = 'high'\n"))
+    assert cfg.dast.target == ""
+    assert cfg.dast.image == ""
+    assert cfg.dast.ajax_spider is False
+    assert cfg.dast.config_file == ""
+    assert cfg.dast.network_mode == "bridge"
+
+
+def test_dast_section_parses_all_fields(tmp_path: Path) -> None:
+    digest = "a" * 64
+    cfg = load_config_file(
+        _write(
+            tmp_path,
+            f"""
+[dast]
+target = "https://example.com/"
+image = "zaproxy/zap-stable@sha256:{digest}"
+ajax_spider = true
+config_file = "/zap/ctx.xml"
+network_mode = "host"
+timeout_seconds = 600
+""",
+        )
+    )
+    assert cfg.dast.target == "https://example.com/"
+    assert cfg.dast.image == f"zaproxy/zap-stable@sha256:{digest}"
+    assert cfg.dast.ajax_spider is True
+    assert cfg.dast.config_file == "/zap/ctx.xml"
+    assert cfg.dast.network_mode == "host"
+    assert cfg.dast.timeout_seconds == 600
+
+
+def test_dast_network_mode_validated(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=r"bridge.*host"):
+        load_config_file(
+            _write(tmp_path, "[dast]\nnetwork_mode = 'none'\n")
+        )
+
+
+def test_dast_rejects_unknown_keys(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=r"\[dast\] unknown keys"):
+        load_config_file(
+            _write(tmp_path, "[dast]\nweird_flag = true\n")
+        )
+
+
+def test_dast_in_severity_unknown_policy(tmp_path: Path) -> None:
+    cfg = load_config_file(
+        _write(
+            tmp_path,
+            "[scan.severity_unknown_policy]\ndast = 'fail'\n",
+        )
+    )
+    assert cfg.severity_unknown_policy.dast == "fail"
+    # And the default remains "warn" when not set.
+    cfg2 = load_config_file(_write(tmp_path, "[scan]\nfail_on = 'high'\n"))
+    assert cfg2.severity_unknown_policy.dast == "warn"

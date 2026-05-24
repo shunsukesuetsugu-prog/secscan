@@ -32,6 +32,7 @@ DEFAULT_FAIL_ON: Severity = Severity.HIGH
 DEFAULT_DEPS_TIMEOUT = 300
 DEFAULT_SAST_TIMEOUT = 900
 DEFAULT_SECRETS_TIMEOUT = 300
+DEFAULT_DAST_TIMEOUT = 900
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -60,6 +61,7 @@ class UnknownSeverityPolicy:
     deps: str = "warn"
     sast: str = "warn"
     secrets: str = "fail"
+    dast: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -91,6 +93,36 @@ class SecretsConfig:
 
 
 @dataclass(frozen=True)
+class DastConfig:
+    """Phase 2-D DAST scanner configuration.
+
+    Unlike the other scanners, DAST is opt-in: it only runs when a
+    ``target`` URL is configured (either via ``--target`` on the CLI
+    or ``dast.target`` in ``.secscan.toml``). With ``target=""`` the
+    scanner is filtered out of ``secscan all``.
+
+    ``image`` MUST be of the form ``<repo>[:tag]@sha256:<64 hex>`` —
+    digest pinning is enforced in
+    ``secscan.scanners.dast.zap.validate_image_ref``. The default value
+    points at the upstream ZAP image but with an all-zeroes digest; the
+    operator is expected to supply a verified digest the first time
+    they enable DAST.
+
+    ``network_mode``: ``bridge`` (default) or ``host``. Use ``host``
+    only when the DAST target is reachable only on the host network
+    namespace (e.g. a dev server bound to 127.0.0.1).
+    """
+
+    target: str = ""
+    image: str = ""
+    """Empty string means "use the pinned default" (see ``dast/_pinned.py``)."""
+    ajax_spider: bool = False
+    config_file: str = ""
+    network_mode: str = "bridge"
+    timeout_seconds: int = DEFAULT_DAST_TIMEOUT
+
+
+@dataclass(frozen=True)
 class BaselineConfig:
     path: Path = Path(DEFAULT_BASELINE_PATH)
     default_expiry_days: int = DEFAULT_BASELINE_EXPIRY_DAYS
@@ -104,6 +136,7 @@ class ProjectConfig:
     deps: DepsConfig = field(default_factory=DepsConfig)
     sast: SastConfig = field(default_factory=SastConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
+    dast: DastConfig = field(default_factory=DastConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -178,6 +211,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         deps=cfg.deps,
         sast=cfg.sast,
         secrets=cfg.secrets,
+        dast=cfg.dast,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -186,7 +220,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
 
 # --- Parsing primitives ----------------------------------------------------
 
-_VALID_SCANNERS = frozenset({"deps", "sast", "secrets"})
+_VALID_SCANNERS = frozenset({"deps", "sast", "secrets", "dast"})
 
 
 def _require_table(value: object, name: str) -> dict[str, object]:
@@ -262,7 +296,7 @@ def _reject_unknown(table: dict[str, object], known: set[str], section: str) -> 
 def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     _reject_unknown(
         raw,
-        {"scan", "deps", "sast", "secrets", "baseline", "severity_overrides"},
+        {"scan", "deps", "sast", "secrets", "dast", "baseline", "severity_overrides"},
         "root",
     )
 
@@ -270,6 +304,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     deps = _parse_deps(_require_table(raw.get("deps"), "deps"))
     sast = _parse_sast(_require_table(raw.get("sast"), "sast"))
     secrets = _parse_secrets(_require_table(raw.get("secrets"), "secrets"))
+    dast = _parse_dast(_require_table(raw.get("dast"), "dast"))
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -305,6 +340,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         deps=deps,
         sast=sast,
         secrets=secrets,
+        dast=dast,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -312,7 +348,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
 
 
 def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
-    _reject_unknown(table, {"deps", "sast", "secrets"}, "scan.severity_unknown_policy")
+    _reject_unknown(
+        table, {"deps", "sast", "secrets", "dast"}, "scan.severity_unknown_policy"
+    )
     defaults = UnknownSeverityPolicy()
     values: dict[str, str] = {}
     for scanner in _VALID_SCANNERS:
@@ -377,6 +415,44 @@ def _parse_secrets(table: dict[str, object]) -> SecretsConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_SECRETS_TIMEOUT),
             "secrets.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_dast(table: dict[str, object]) -> DastConfig:
+    _reject_unknown(
+        table,
+        {
+            "target",
+            "image",
+            "ajax_spider",
+            "config_file",
+            "network_mode",
+            "timeout_seconds",
+        },
+        "dast",
+    )
+    network_mode = _require_str(
+        table.get("network_mode", "bridge"), "dast.network_mode"
+    )
+    if network_mode not in ("bridge", "host"):
+        raise ConfigError(
+            f"dast.network_mode: must be 'bridge' or 'host' (got {network_mode!r})"
+        )
+    return DastConfig(
+        target=_require_str(table.get("target", ""), "dast.target"),
+        image=_require_str(table.get("image", ""), "dast.image"),
+        ajax_spider=_require_bool(
+            table.get("ajax_spider", False), "dast.ajax_spider"
+        ),
+        config_file=_require_str(
+            table.get("config_file", ""), "dast.config_file"
+        ),
+        network_mode=network_mode,
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_DAST_TIMEOUT),
+            "dast.timeout_seconds",
             minimum=1,
         ),
     )
