@@ -135,6 +135,7 @@ class DastConfig:
     ajax_spider: bool = False
     config_file: str | None = None
     network_mode: str = "bridge"
+    mode: str = "baseline"
 
 
 class DastScanner(Scanner):
@@ -255,6 +256,7 @@ class DastScanner(Scanner):
                 config_file=dast_config.config_file,
                 network_mode=dast_config.network_mode,
                 report_volume=volume_name,
+                mode=dast_config.mode,
             )
             try:
                 scan_argv = build_argv(invocation)
@@ -391,12 +393,23 @@ def _resolve_dast_config(config: ScanConfig) -> DastConfig:
         raise DastInputError(
             f"dast.network_mode must be 'bridge' or 'host', got {network_mode!r}"
         )
+
+    mode_raw = extra.get("mode", "baseline")
+    if not isinstance(mode_raw, str):
+        raise DastInputError("dast.mode must be a string")
+    mode = mode_raw.strip().lower()
+    if mode not in ("baseline", "active"):
+        raise DastInputError(
+            f"dast.mode must be 'baseline' or 'active', got {mode!r}"
+        )
+
     return DastConfig(
         target_url=target.strip(),
         image_ref=image_ref,
         ajax_spider=ajax_spider,
         config_file=config_file,
         network_mode=network_mode,
+        mode=mode,
     )
 
 

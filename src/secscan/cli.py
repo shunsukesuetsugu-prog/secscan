@@ -156,6 +156,17 @@ def _build_parser() -> argparse.ArgumentParser:
                     "when the target is reachable only on the host namespace."
                 ),
             )
+            sub.add_argument(
+                "--mode",
+                choices=("baseline", "active"),
+                default=None,
+                help=(
+                    "ZAP scan mode (default: baseline). 'active' runs "
+                    "zap-full-scan.py which sends payloads (SQLi / XSS / "
+                    "auth-bypass) — 10x slower and DO NOT point at "
+                    "production targets."
+                ),
+            )
 
     # secscan baseline …
     baseline_parser = subparsers.add_parser(
@@ -582,6 +593,9 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
     zap_network = getattr(args, "zap_network", None)
     if isinstance(zap_network, str) and zap_network:
         new = replace(new, dast=replace(new.dast, network_mode=zap_network))
+    dast_mode = getattr(args, "mode", None)
+    if isinstance(dast_mode, str) and dast_mode:
+        new = replace(new, dast=replace(new.dast, mode=dast_mode))
 
     if getattr(args, "no_baseline", False):
         # Easiest way to disable baseline: point it at a path that won't

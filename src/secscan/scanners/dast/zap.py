@@ -281,6 +281,22 @@ class ZapInvocation:
     Tests that exercise argv shape without docker may set neither.
     """
 
+    mode: str = "baseline"
+    """``"baseline"`` (default) or ``"active"``.
+
+    Phase 2-J: ``baseline`` runs ``zap-baseline.py`` (purely
+    passive — HTTP header / cookie / CSP observation). ``active``
+    runs ``zap-full-scan.py`` which sends payloads (SQLi / XSS /
+    auth-bypass attempts / weak-password trials). Active mode
+    catches CWE-287-style auth flaws the baseline misses but is
+    10x slower and **must NOT be pointed at production targets**:
+    it will send malformed input that can degrade service or
+    create test rows in user-facing tables.
+
+    The DastScanner refuses any other value loudly so a misspelled
+    ``"acttive"`` doesn't silently fall back to baseline.
+    """
+
 
 # Container-side mount point. ZAP's image uses ``/zap/wrk`` as the
 # documented working directory for input contexts and output reports
@@ -380,12 +396,21 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
             ["-v", f"{invocation.report_volume}:{_ZAP_WORK_DIR}:rw"]
         )
         argv.extend(["--security-opt=no-new-privileges"])
+    # Phase 2-J: choose the ZAP entrypoint by mode.
+    if invocation.mode == "baseline":
+        zap_entrypoint = "zap-baseline.py"
+    elif invocation.mode == "active":
+        zap_entrypoint = "zap-full-scan.py"
+    else:
+        raise DastInputError(
+            f"mode must be 'baseline' or 'active', got {invocation.mode!r}"
+        )
     argv.extend(
         [
             "-t",
             "--",
             image_ref,
-            "zap-baseline.py",
+            zap_entrypoint,
             "-t",
             invocation.target_url,
         ]

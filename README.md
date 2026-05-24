@@ -448,7 +448,9 @@ specific Codex review iteration that motivated each invariant.
 | 2-G   | bundled secscan semgrep rules (recall 86.7% → 100%) | done (v0.8.0)          |
 | 2-H   | DAST 自動計測 (Juice Shop + docker volume lifecycle) | done (v0.9.0)         |
 | 2-I   | 外部 benchmark (NodeGoat / PyGoat / WebGoat / gitleaks corpus) | done (v0.10.0) |
-| 2-J+  | broader real-codebase FP corpus, additional language packs | future          |
+| 2-J   | ZAP active scan opt-in (`--mode=active` + `--dast-active`) | done (v0.11.0)    |
+| 2-K   | ZAP auth-flow context (login → session → 保護リソース) | planned             |
+| 2-L+  | Trivy config scan (IaC/k8s/Docker)                  | planned             |
 
 ## Development
 

@@ -869,10 +869,13 @@ def _bench_external_sast(fixture_dir: Path) -> FixtureResult:
     )
 
 
-def _bench_dast_all() -> list[FixtureResult]:
+def _bench_dast_all(*, mode: str = "baseline") -> list[FixtureResult]:
     """Iterate every fixture under ``bench/fixtures/dast/`` and run
-    DAST against each. Phase 2-I added a second fixture (WebGoat)
-    alongside the original Juice Shop, so the runner became plural.
+    DAST against each.
+
+    ``mode`` selects the ZAP entrypoint to use (``baseline`` ↔
+    zap-baseline.py, ``active`` ↔ zap-full-scan.py). Phase 2-J
+    added the active-mode path; baseline remains the default.
     """
     dast_root = SAFE_FIXTURE_ROOT / "dast"
     if not dast_root.is_dir():
@@ -883,11 +886,11 @@ def _bench_dast_all() -> list[FixtureResult]:
             continue
         if not (sub / "expected.json").exists():
             continue
-        results.append(_bench_dast(sub))
+        results.append(_bench_dast(sub, mode=mode))
     return results
 
 
-def _bench_dast(fixture_dir: Path) -> FixtureResult:
+def _bench_dast(fixture_dir: Path, *, mode: str = "baseline") -> FixtureResult:
     if not fixture_dir.exists() or not (fixture_dir / "expected.json").exists():
         return FixtureResult(
             scanner="dast",
@@ -951,7 +954,27 @@ def _bench_dast(fixture_dir: Path) -> FixtureResult:
 
     container_name = f"secscan-bench-{fixture_name}-{_secrets.token_hex(4)}"
     host_port = _pick_free_port()
-    expected_findings = expected.get("expected_findings", [])
+    # Phase 2-J: choose the expected set by mode.
+    if mode == "active":
+        expected_findings = expected.get("expected_active_findings", [])
+        scanner_label = "dast (active)"
+        # Active scan needs much more time (full-scan ~ 30-60 min).
+        scan_timeout = 4 * 3600
+    else:
+        expected_findings = expected.get("expected_findings", [])
+        scanner_label = "dast"
+        scan_timeout = 900
+    if not expected_findings:
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=(
+                f"no expected_{'active_' if mode == 'active' else ''}findings "
+                f"in expected.json"
+            ),
+        )
     container_started = False
     try:
         # 1. Start the target container in the background.
@@ -1013,6 +1036,8 @@ def _bench_dast(fixture_dir: Path) -> FixtureResult:
             f"http://host.docker.internal:{host_port}{url_path}",
             "--zap-image",
             zap_image,
+            "--mode",
+            mode,
             "--format",
             "json",
             "--fail-on",
@@ -1021,10 +1046,10 @@ def _bench_dast(fixture_dir: Path) -> FixtureResult:
             "--path",
             str(fixture_dir),
         ]
-        result = _run(argv, cwd=REPO_ROOT, timeout=900)
+        result = _run(argv, cwd=REPO_ROOT, timeout=scan_timeout)
         if not result.stdout:
             return FixtureResult(
-                scanner="dast",
+                scanner=scanner_label,
                 fixture_name=fixture_name,
                 expected_count=len(expected_findings),
                 detected_count=0,
@@ -1043,12 +1068,14 @@ def _bench_dast(fixture_dir: Path) -> FixtureResult:
         )
 
         return FixtureResult(
-            scanner="dast",
+            scanner=scanner_label,
             fixture_name=fixture_name,
             expected_count=len(expected_findings),
             detected_count=detected,
             raw_finding_count=len(findings),
-            comparison_tool="zap-baseline",
+            comparison_tool=(
+                "zap-full-scan" if mode == "active" else "zap-baseline"
+            ),
         )
     finally:
         if container_started:
@@ -1063,7 +1090,11 @@ def _bench_dast(fixture_dir: Path) -> FixtureResult:
 
 
 def run_all(
-    *, scanners: set[str], include_dast: bool, include_external: bool
+    *,
+    scanners: set[str],
+    include_dast: bool,
+    include_dast_active: bool = False,
+    include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
     if "secrets" in scanners:
@@ -1089,7 +1120,9 @@ def run_all(
                 continue
             results.append(_bench_sast(sub))
     if include_dast:
-        results.extend(_bench_dast_all())
+        results.extend(_bench_dast_all(mode="baseline"))
+    if include_dast_active:
+        results.extend(_bench_dast_all(mode="active"))
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -1231,7 +1264,18 @@ def main(argv: list[str] | None = None) -> int:
         default="deps,secrets,sast",
         help="comma-separated subset (deps,secrets,sast). Default: all.",
     )
-    parser.add_argument("--dast", action="store_true", help="include DAST")
+    parser.add_argument("--dast", action="store_true", help="include DAST baseline")
+    parser.add_argument(
+        "--dast-active",
+        action="store_true",
+        dest="dast_active",
+        help=(
+            "include DAST in ACTIVE mode (zap-full-scan.py — sends "
+            "payloads, 10x slower, ~30-60 min per target). Do NOT "
+            "point at production. Stacks with --dast: passing both "
+            "runs each fixture twice, once per mode."
+        ),
+    )
     parser.add_argument(
         "--external",
         action="store_true",
@@ -1256,6 +1300,7 @@ def main(argv: list[str] | None = None) -> int:
         results = run_all(
             scanners=scanners,
             include_dast=args.dast,
+            include_dast_active=args.dast_active,
             include_external=args.external,
         )
     except BenchError as exc:

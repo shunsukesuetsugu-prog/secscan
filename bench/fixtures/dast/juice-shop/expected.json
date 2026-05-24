@@ -47,5 +47,46 @@
       "name": "Modern Web Application",
       "min_severity": "INFO"
     }
+  ],
+  "expected_active_findings": [
+    {
+      "pluginid": "10038",
+      "name": "Content Security Policy (CSP) Header Not Set",
+      "min_severity": "MEDIUM",
+      "note": "fires in both baseline and active"
+    },
+    {
+      "pluginid": "10098",
+      "name": "Cross-Domain Misconfiguration",
+      "min_severity": "MEDIUM",
+      "note": "fires in both modes"
+    },
+    {
+      "pluginid": "10095",
+      "name": "Backup File Disclosure",
+      "min_severity": "MEDIUM",
+      "cwe_topic": "CWE-538: File and Directory Information Exposure",
+      "note": "active-only: probes for .bak / .old / .swp variants"
+    },
+    {
+      "pluginid": "40038",
+      "name": "Bypassing 403 (auth bypass)",
+      "min_severity": "MEDIUM",
+      "cwe_topic": "CWE-287 / CWE-639: Authentication / Authorization Bypass",
+      "note": "active-only: classic CWE-287 detection — sends status-manipulation payloads to reach 403-protected paths. This is what the baseline-vs-active comparison is for."
+    },
+    {
+      "pluginid": "40040",
+      "name": "CORS Misconfiguration",
+      "min_severity": "MEDIUM",
+      "cwe_topic": "CWE-942: Permissive Cross-domain Policy",
+      "note": "active-only: probes Origin header reflection"
+    },
+    {
+      "pluginid": "10110",
+      "name": "Dangerous JS Functions",
+      "min_severity": "LOW",
+      "note": "fires in both modes"
+    }
   ]
 }

@@ -152,6 +152,13 @@ class DastConfig:
     config_file: str = ""
     network_mode: str = "bridge"
     timeout_seconds: int = DEFAULT_DAST_TIMEOUT
+    mode: str = "baseline"
+    """Phase 2-J: ``baseline`` (passive, ~3 min) or ``active``
+    (sends payloads — SQLi / XSS / auth-bypass — ~30-60 min).
+    Active mode catches CWE-287 / CWE-89 / CWE-79 patterns the
+    baseline misses but MUST NOT be pointed at production
+    targets; it will issue malformed requests that can degrade
+    service or create user-visible test rows."""
 
 
 @dataclass(frozen=True)
@@ -472,6 +479,11 @@ def _parse_dast(table: dict[str, object]) -> DastConfig:
         raise ConfigError(
             f"dast.network_mode: must be 'bridge' or 'host' (got {network_mode!r})"
         )
+    mode = _require_str(table.get("mode", "baseline"), "dast.mode")
+    if mode not in ("baseline", "active"):
+        raise ConfigError(
+            f"dast.mode: must be 'baseline' or 'active' (got {mode!r})"
+        )
     return DastConfig(
         target=_require_str(table.get("target", ""), "dast.target"),
         image=_require_str(table.get("image", ""), "dast.image"),
@@ -487,6 +499,7 @@ def _parse_dast(table: dict[str, object]) -> DastConfig:
             "dast.timeout_seconds",
             minimum=1,
         ),
+        mode=mode,
     )
 
 

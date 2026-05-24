@@ -234,6 +234,7 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
                     "ajax_spider": dast.ajax_spider,
                     "config_file": dast.config_file or None,
                     "network_mode": dast.network_mode,
+                    "mode": dast.mode,
                 }
             ),
         )
