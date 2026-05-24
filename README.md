@@ -326,35 +326,40 @@ snapshot; see `bench/report.md` for the full table):
 
 | Scanner | Fixture | Expected | Detected | Recall | FP | vs single tool |
 |---|---|---|---|---|---|---|
-| deps    | npm-vulnerable | 2 | 2 | **100%** | 0 | ≥ npm audit ✅ |
-| deps    | pip-vulnerable | 3 | 3 | **100%** | 0 | 15 vs pip-audit 19 ⚠️ |
-| sast    | python | 4 | 1 | 25% | 0 | ≥ semgrep ✅ |
-| sast    | javascript | 2 | 0 | 0% | 0 | ≥ semgrep ✅ |
-| secrets | synthetic | 4 | — | SKIPPED | — | gitleaks not installed |
+| deps    | npm-vulnerable | 2 | 2 | **100%** | 0 | = npm audit ✅ |
+| deps    | pip-vulnerable | 3 | 3 | **100%** | 0 | = pip-audit (deduped) ✅ |
+| sast    | python | 4 | 2 | 50% | 0 | = semgrep ✅ |
+| sast    | javascript | 2 | 2 | **100%** | 0 | = semgrep ✅ |
+| secrets | synthetic | 4 | 4 | **100%** | 0 | = gitleaks ✅ |
 | dast    | juice-shop | — | — | SKIPPED | — | run manually |
 
-Honest summary of what these numbers say:
+**Overall recall: 13/15 = 86.7%**, false positives: **0**, ≥ best
+single tool: **4/4**.
 
-- **deps**: secscan reaches **100% recall** on the curated set (5/5
-  packages with known CVEs). On parity with `npm audit`. A 15-vs-19
-  raw-count gap against `pip-audit` is the one outlier (the
-  integration de-dups some advisories `pip-audit` reports
-  separately; the curated set is still 100%).
-- **sast**: the **default semgrep ruleset family** (`p/python +
-  p/javascript + p/typescript + p/owasp-top-ten`) reliably catches
-  command-injection patterns but **misses** SQLi via f-string, raw
-  `yaml.load`, hard-coded credentials, and JS `eval()` on
-  CommonJS-style code. secscan returns parity with semgrep run
-  directly with the same rules — i.e. the gap is in the ruleset,
-  not the wrapper. Users who need broader CWE coverage should add
-  `p/security-audit` to `[sast].semgrep_config`.
-- **secrets**: skipped here because `gitleaks` isn't on this
-  machine's PATH. With gitleaks installed, the 4 synthetic
-  credential fixtures (all SHA-256-pinned via
-  `bench/fixtures/secrets/synthetic/_manifest.json`) and a
-  borderline-clean false-positive sample run automatically.
-- **dast**: deliberately a manual measurement (Docker + OWASP Juice
-  Shop bring-up is too heavy for CI).
+Phase 2-F tuning (post-initial benchmark) lifted recall from
+54.5% to 86.7% by:
+
+1. Adding `p/default` to the default semgrep ruleset family
+   (JavaScript SAST: 0% → 100%; Python SAST: 25% → 50%).
+2. Switching gitleaks from `--report-path=/dev/stdout` (which
+   gitleaks refuses to open on macOS) to a 0700 tempfile the
+   scanner manages — fixing a real cross-platform bug the
+   benchmark surfaced.
+3. De-duplicating the pip-audit comparison count by `(package,
+   advisory_id)` (pip-audit ships some advisories twice from
+   different source DBs; secscan dedups, so a fair comparison
+   must too).
+
+What's still missed:
+
+- **SAST Python**: `yaml.load` without SafeLoader and bare
+  hard-coded credentials. The default semgrep registry packs
+  don't carry rules for these. Users who need broader CWE
+  coverage can add `p/security-audit` to `[sast].semgrep_config`.
+  Going further means shipping a custom secscan rule pack — a
+  candidate for Phase 2-G.
+- **DAST**: deliberately a manual measurement (Docker + OWASP
+  Juice Shop bring-up is too heavy for CI).
 
 See `bench/README.md` for the full methodology, retraction policy,
 and how to add new fixtures.
@@ -403,12 +408,13 @@ specific Codex review iteration that motivated each invariant.
 | 2-C   | uv per-member audit + Yarn Berry workspaces        | done (v0.4.0)           |
 | 2-D   | DAST (OWASP ZAP, Docker)                           | done (v0.5.0)           |
 | 2-E   | detection-rate benchmark (bench/)                  | done (v0.6.0)           |
-| 2-F+  | broader semgrep ruleset defaults, more DAST profiles | future                  |
+| 2-F   | tune defaults to improve bench recall (54.5% → 86.7%) | done (v0.7.0)        |
+| 2-G+  | custom secscan rule pack for SAST gaps; DAST profiles | future               |
 
 ## Development
 
 ```sh
-.venv/bin/pytest               # 631 unit tests + 2 integration (skipped without the binaries)
+.venv/bin/pytest               # 636 unit tests + 2 integration (skipped without the binaries)
 .venv/bin/ruff check src/ tests/ bench/
 .venv/bin/mypy --strict src/secscan
 .venv/bin/python bench/run.py  # detection-rate benchmark (see bench/README.md)

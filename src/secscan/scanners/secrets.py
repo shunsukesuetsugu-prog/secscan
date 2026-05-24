@@ -23,9 +23,12 @@ Tested with gitleaks v8.x.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,69 +74,130 @@ class SecretsScanner(Scanner):
         if shutil.which(self.tool_executable) is None:
             raise ToolNotFoundError(self.tool_executable, self.install_hint)
 
+        # Phase 2-F: write the JSON report to a temp file rather than
+        # ``/dev/stdout``. On macOS gitleaks refuses to ``open("/dev/
+        # stdout")`` because it's a character device that gitleaks'
+        # writer cannot ``Truncate(0)`` against ("permission denied"),
+        # which caused every secrets scan on macOS to error with
+        # ``returncode=1``. We mkdtemp under TMPDIR (0700) and read
+        # the file back into ``stdout_bytes``, then clean up.
+        tmp_dir = Path(tempfile.mkdtemp(prefix="secscan-gitleaks-"))
+        os.chmod(tmp_dir, 0o700)
+        report_path = tmp_dir / "report.json"
         argv = [
             "gitleaks",
             "dir",
             str(unit.root),
             "--redact=100",
             "--report-format=json",
-            "--report-path=/dev/stdout",
+            f"--report-path={report_path}",
             f"--exit-code={_GITLEAKS_LEAK_EXIT_CODE}",
             "--no-banner",
         ]
 
-        result = runner.run(argv, cwd=unit.root, timeout_seconds=config.timeout_seconds)
-        tool_version = _detect_gitleaks_version(runner, unit.root)
-
-        if result.timed_out:
-            return _error(
-                self.name,
-                "gitleaks timed out",
-                stderr=result.stderr,
-                returncode=result.returncode,
-                tool_version=tool_version,
-                duration=result.duration_seconds,
+        try:
+            result = runner.run(
+                argv, cwd=unit.root, timeout_seconds=config.timeout_seconds
             )
+            tool_version = _detect_gitleaks_version(runner, unit.root)
 
-        if result.returncode == 0:
-            # No leaks detected — gitleaks may still write `[]` or nothing.
-            return ScanOutcome(
-                scanner=self.name,
-                findings=(),
-                tool_version=tool_version,
-                duration_seconds=result.duration_seconds,
-            )
-
-        if result.returncode == _GITLEAKS_LEAK_EXIT_CODE:
-            # Expected "leaks present" exit. stdout MUST be a non-empty JSON
-            # array. Codex 3rd review: "101 + empty stdout" must NOT be
-            # silently treated as zero findings — that's a false-clean.
-            parsed = _parse_findings(result.stdout, unit.root)
-            if isinstance(parsed, _ParseError):
+            if result.timed_out:
                 return _error(
                     self.name,
-                    parsed.reason,
+                    "gitleaks timed out",
                     stderr=result.stderr,
                     returncode=result.returncode,
                     tool_version=tool_version,
                     duration=result.duration_seconds,
                 )
-            return ScanOutcome(
-                scanner=self.name,
-                findings=parsed,
-                tool_version=tool_version,
-                duration_seconds=result.duration_seconds,
-            )
 
-        # Any other exit code is an error. Include redacted stderr excerpt.
-        return _error(
-            self.name,
-            f"gitleaks exited with {result.returncode}",
-            stderr=result.stderr,
-            returncode=result.returncode,
-            tool_version=tool_version,
-            duration=result.duration_seconds,
-        )
+            # Tighten the report file's permissions to 0600 (Codex
+            # Phase 2-F diff review pin). gitleaks creates the file
+            # under our 0700 directory, but the file inherits the
+            # caller's umask — on machines with a permissive umask
+            # the file could be world-readable for the brief window
+            # before cleanup. Explicit chmod removes that window.
+            if report_path.exists():
+                # Best-effort: if chmod fails (e.g. cross-FS quirks)
+                # we still proceed; the 0700 parent dir is the
+                # primary access barrier.
+                with contextlib.suppress(OSError):
+                    os.chmod(report_path, 0o600)
+
+            # Read the report file (if produced) for downstream parsing.
+            # ``report_bytes`` is the equivalent of the previous stdout
+            # content; we keep the variable name ``stdout`` further down
+            # to minimise diff against the original logic.
+            try:
+                report_bytes = report_path.read_bytes() if report_path.exists() else b""
+            except OSError:
+                report_bytes = b""
+
+            if result.returncode == 0:
+                # No leaks detected — gitleaks may still write `[]`
+                # or nothing to the report path.
+                return ScanOutcome(
+                    scanner=self.name,
+                    findings=(),
+                    tool_version=tool_version,
+                    duration_seconds=result.duration_seconds,
+                )
+
+            if result.returncode == _GITLEAKS_LEAK_EXIT_CODE:
+                # Expected "leaks present" exit. The report MUST be a
+                # non-empty JSON array. Codex 3rd review: "101 + empty
+                # report" must NOT be silently treated as zero
+                # findings — that's a false-clean.
+                parsed = _parse_findings(report_bytes, unit.root)
+                if isinstance(parsed, _ParseError):
+                    return _error(
+                        self.name,
+                        parsed.reason,
+                        stderr=result.stderr,
+                        returncode=result.returncode,
+                        tool_version=tool_version,
+                        duration=result.duration_seconds,
+                    )
+                return ScanOutcome(
+                    scanner=self.name,
+                    findings=parsed,
+                    tool_version=tool_version,
+                    duration_seconds=result.duration_seconds,
+                )
+
+            # Any other exit code is an error. Include redacted stderr.
+            return _error(
+                self.name,
+                f"gitleaks exited with {result.returncode}",
+                stderr=result.stderr,
+                returncode=result.returncode,
+                tool_version=tool_version,
+                duration=result.duration_seconds,
+            )
+        finally:
+            # Always clean up the temp directory — the report may
+            # contain redacted-but-sensitive-shaped strings we don't
+            # want lingering on disk.
+            #
+            # Codex Phase 2-F diff review: ``ignore_errors=True``
+            # silenced any cleanup failure (e.g. a stale file handle
+            # on Windows, a permission flip mid-run). Bubble those
+            # up via a warning callback so the operator can audit
+            # /tmp for orphaned ``secscan-gitleaks-*`` directories.
+            def _on_rmtree_error(func: object, path: str, _excinfo: object) -> None:
+                # Use stderr directly so this surfaces in both the
+                # CLI and any test harness that captures stderr.
+                import sys as _sys
+
+                _sys.stderr.write(
+                    f"secscan: warning: failed to clean up gitleaks "
+                    f"report tempfile {path!r}; please remove manually\n"
+                )
+
+            # ``onerror`` is the cross-version-stable hook on
+            # 3.11+ (``onexc`` arrived in 3.12 but mypy stubs the
+            # signature based on the resolved Python version).
+            shutil.rmtree(tmp_dir, onerror=_on_rmtree_error)
 
 
 def _detect_gitleaks_version(runner: CommandRunner, cwd: Path) -> str | None:

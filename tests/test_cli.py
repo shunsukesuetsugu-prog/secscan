@@ -95,6 +95,22 @@ class _ScriptedRunner:
                 timed_out=False,
             )
         canned = self.responses.pop(0)
+        # Phase 2-F: the secrets scanner switched from
+        # ``--report-path=/dev/stdout`` (which gitleaks refuses on
+        # macOS) to ``--report-path=<tempfile>``. To preserve the
+        # test contract — "the scripted stdout is what the parser
+        # sees" — mirror gitleaks behaviour by also writing the
+        # scripted bytes to the report-path file, if any.
+        for token in argv:
+            if isinstance(token, str) and token.startswith("--report-path="):
+                report_path = Path(token.split("=", 1)[1])
+                if report_path != Path("/dev/stdout"):
+                    try:
+                        report_path.parent.mkdir(parents=True, exist_ok=True)
+                        report_path.write_bytes(canned.stdout)
+                    except OSError:
+                        pass
+                break
         return replace(canned, argv=tuple(argv))
 
 

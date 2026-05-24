@@ -2,25 +2,25 @@
   "fixtures": [
     {
       "comparison_count": null,
-      "comparison_tool": null,
+      "comparison_tool": "gitleaks",
       "detected_count": 0,
       "expected_count": 0,
       "false_positive_count": 0,
       "fixture_name": "clean",
       "raw_finding_count": 0,
       "scanner": "secrets",
-      "skipped_reason": "gitleaks not installed"
+      "skipped_reason": null
     },
     {
       "comparison_count": null,
-      "comparison_tool": null,
-      "detected_count": 0,
+      "comparison_tool": "gitleaks",
+      "detected_count": 4,
       "expected_count": 4,
       "false_positive_count": 0,
       "fixture_name": "synthetic",
-      "raw_finding_count": 0,
+      "raw_finding_count": 4,
       "scanner": "secrets",
-      "skipped_reason": "gitleaks not installed"
+      "skipped_reason": null
     },
     {
       "comparison_count": 2,
@@ -34,7 +34,7 @@
       "skipped_reason": null
     },
     {
-      "comparison_count": 19,
+      "comparison_count": 15,
       "comparison_tool": "pip-audit",
       "detected_count": 3,
       "expected_count": 3,
@@ -45,24 +45,24 @@
       "skipped_reason": null
     },
     {
-      "comparison_count": 0,
+      "comparison_count": 2,
       "comparison_tool": "semgrep",
-      "detected_count": 0,
+      "detected_count": 2,
       "expected_count": 2,
       "false_positive_count": 0,
       "fixture_name": "javascript",
-      "raw_finding_count": 0,
+      "raw_finding_count": 2,
       "scanner": "sast",
       "skipped_reason": null
     },
     {
-      "comparison_count": 2,
+      "comparison_count": 5,
       "comparison_tool": "semgrep",
-      "detected_count": 1,
+      "detected_count": 2,
       "expected_count": 4,
       "false_positive_count": 0,
       "fixture_name": "python",
-      "raw_finding_count": 2,
+      "raw_finding_count": 5,
       "scanner": "sast",
       "skipped_reason": null
     }

@@ -424,9 +424,30 @@ def _run_pip_audit_count(fixture_dir: Path) -> int | None:
         )
         if not result.stdout:
             return None
-        data = json.loads(result.stdout.decode("utf-8"))
+        # pip-audit emits ``WARNING:pip_audit._cli:...`` lines on
+        # stdout before the JSON body when running with ``--no-deps
+        # --disable-pip``. Strip everything up to the first ``{``.
+        raw = result.stdout.decode("utf-8", errors="replace")
+        start = raw.find("{")
+        if start < 0:
+            return None
+        data = json.loads(raw[start:])
         deps = data.get("dependencies", [])
-        return sum(len(d.get("vulns", [])) for d in deps)
+        # pip-audit duplicates the SAME advisory id across multiple
+        # entries for a single dependency (one entry per source
+        # database, but identical id). secscan dedups by (package,
+        # advisory_id) so the comparison must do the same to be
+        # apples-to-apples — otherwise the parity check fires a
+        # spurious ⚠️ for the duplicate noise.
+        unique: set[tuple[str, str]] = set()
+        for dep in deps:
+            name = dep.get("name", "")
+            for vuln in dep.get("vulns", []):
+                vid = vuln.get("id", "")
+                if not vid:
+                    continue
+                unique.add((name, vid))
+        return len(unique)
     except Exception:
         return None
     finally:
@@ -546,21 +567,23 @@ def _run_semgrep_direct_count(fixture_dir: Path) -> int | None:
     try:
         # Match secscan's default ruleset family so the comparison is
         # apples-to-apples (same rules; just different orchestrator).
-        argv = [
-            "semgrep",
-            "--config",
-            "p/python",
-            "--config",
-            "p/javascript",
-            "--config",
-            "p/typescript",
-            "--config",
-            "p/owasp-top-ten",
-            "--json",
-            "--quiet",
-            "--metrics=off",
-            str(fixture_copy),
-        ]
+        # Codex Phase 2-F diff review: pull from the live
+        # ``DEFAULT_SEMGREP_CONFIG`` rather than hardcoding the list
+        # — otherwise tuning the default in src/secscan/config.py
+        # silently breaks the comparison without anyone noticing.
+        from secscan.config import DEFAULT_SEMGREP_CONFIG
+
+        argv = ["semgrep"]
+        for ruleset in DEFAULT_SEMGREP_CONFIG:
+            argv.extend(["--config", ruleset])
+        argv.extend(
+            [
+                "--json",
+                "--quiet",
+                "--metrics=off",
+                str(fixture_copy),
+            ]
+        )
         result = _run(argv, cwd=fixture_copy, env=_isolated_env(tmp), timeout=300)
         if not result.stdout:
             return None

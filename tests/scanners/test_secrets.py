@@ -78,6 +78,23 @@ class FakeRunner:
                 f"FakeRunner ran out of scripted responses for argv={list(argv)}"
             )
         result = self.responses.pop(0)
+        # Phase 2-F: the secrets scanner now writes gitleaks output to
+        # a tempfile path passed via ``--report-path=<path>`` (not
+        # ``/dev/stdout`` — gitleaks on macOS refuses to open that as
+        # a writable target). Mirror real gitleaks behaviour here by
+        # writing the scripted ``stdout`` bytes to that path so the
+        # scanner reads them back via the file. ``stderr`` and
+        # ``returncode`` still flow through the CommandResult.
+        for token in argv:
+            if token.startswith("--report-path="):
+                report_path = Path(token.split("=", 1)[1])
+                if report_path != Path("/dev/stdout"):
+                    try:
+                        report_path.parent.mkdir(parents=True, exist_ok=True)
+                        report_path.write_bytes(result.stdout)
+                    except OSError:
+                        pass
+                break
         return CommandResult(
             argv=tuple(argv),
             returncode=result.returncode,
@@ -491,8 +508,55 @@ def test_argv_contains_required_safety_flags(
     assert "--report-format=json" in argv
     assert "--no-banner" in argv
     assert "dir" in argv  # `gitleaks dir` (not `git`) — MVP scope
-    # gitleaks must write JSON to stdout, not a file we'd then have to manage.
-    assert "--report-path=/dev/stdout" in argv
+    # Phase 2-F: gitleaks writes its JSON report to a tempfile path
+    # the scanner manages. ``--report-path=/dev/stdout`` was the old
+    # pattern but fails on macOS (gitleaks refuses to open /dev/stdout
+    # as a writable target), so we now allocate a 0700 tempdir and
+    # pass that path. The argv must STILL carry exactly one
+    # ``--report-path=`` flag (defence against accidental omission)
+    # and that path must NOT be ``/dev/stdout`` anymore.
+    report_args = [a for a in argv if a.startswith("--report-path=")]
+    assert len(report_args) == 1, report_args
+    assert report_args[0] != "--report-path=/dev/stdout"
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_report_tempfile_cleaned_up_on_success(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    """Phase 2-F: the tempfile gitleaks writes to may contain
+    redaction-shaped content. The scanner MUST delete it after the
+    scan completes — leaving it on disk would let a later process
+    read a partially-sensitive report."""
+    fake_runner.push(returncode=0, stdout=b"")  # gitleaks scan
+    fake_runner.push(returncode=0, stdout=b"v8")  # version detect
+    scanner.scan(work_unit, fake_runner, ScanConfig())
+    argv = fake_runner.calls[0][0]
+    report_path = next(
+        a.split("=", 1)[1] for a in argv if a.startswith("--report-path=")
+    )
+    # The tempfile and its containing 0700 directory should both be
+    # cleaned up.
+    assert not Path(report_path).exists()
+    assert not Path(report_path).parent.exists()
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_report_tempfile_cleaned_up_on_error(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    """Tempfile cleanup must also run when gitleaks exits with an
+    unexpected status — otherwise an error path leaks the file."""
+    fake_runner.push(returncode=42, stdout=b"", stderr=b"some failure")
+    fake_runner.push(returncode=0, stdout=b"v8")
+    outcome = scanner.scan(work_unit, fake_runner, ScanConfig())
+    assert outcome.error is not None
+    argv = fake_runner.calls[0][0]
+    report_path = next(
+        a.split("=", 1)[1] for a in argv if a.startswith("--report-path=")
+    )
+    assert not Path(report_path).exists()
+    assert not Path(report_path).parent.exists()
 
 
 @pytest.mark.usefixtures("stub_which")

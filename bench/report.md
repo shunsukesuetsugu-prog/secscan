@@ -1,24 +1,24 @@
 # secscan benchmark report
 
-_secscan 0.6.0_
+_secscan 0.7.0_
 
 ## Summary
 
-- Overall recall: **6/11 (54.5%)**
+- Overall recall: **13/15 (86.7%)**
 - Total false positives (clean fixtures): **0**
-- Fixtures run: 4, skipped: 2
-- ≥ best single tool (integration parity): **3/4 fixtures**
+- Fixtures run: 6, skipped: 0
+- ≥ best single tool (integration parity): **4/4 fixtures**
 
 ## Per-fixture detail
 
 | Scanner | Fixture | Expected | Detected | Recall | FP | Compare tool | Compare count | ≥ Best |
 |---|---|---|---|---|---|---|---|---|
-| secrets | clean | — | — | SKIPPED | (gitleaks not installed) | — | — | — |
-| secrets | synthetic | — | — | SKIPPED | (gitleaks not installed) | — | — | — |
+| secrets | clean | 0 | 0 | 100.0% | 0 | gitleaks | — | — |
+| secrets | synthetic | 4 | 4 | 100.0% | 0 | gitleaks | — | — |
 | deps | npm-vulnerable | 2 | 2 | 100.0% | 0 | npm audit | 2 | ✅ |
-| deps | pip-vulnerable | 3 | 3 | 100.0% | 0 | pip-audit | 19 | ⚠️ |
-| sast | javascript | 2 | 0 | 0.0% | 0 | semgrep | 0 | ✅ |
-| sast | python | 4 | 1 | 25.0% | 0 | semgrep | 2 | ✅ |
+| deps | pip-vulnerable | 3 | 3 | 100.0% | 0 | pip-audit | 15 | ✅ |
+| sast | javascript | 2 | 2 | 100.0% | 0 | semgrep | 2 | ✅ |
+| sast | python | 4 | 2 | 50.0% | 0 | semgrep | 5 | ✅ |
 
 ## Methodology notes
 
