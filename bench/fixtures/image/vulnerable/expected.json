@@ -1,0 +1,37 @@
+{
+  "tool_under_test": "secscan image",
+  "comparison_tool": "trivy image (direct)",
+  "advisory_db_snapshot": "2026-05-24",
+  "platform": "linux/amd64",
+  "image_pinning": {
+    "trivy": "aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e",
+    "target": "alpine@sha256:451eee8bedcb2f029756dc3e9d73bab0e7943c1ac55cff3a4861c52a0fdd3e98",
+    "target_tag_at_pinning_time": "alpine:3.10"
+  },
+  "notes": [
+    "Phase 2-M image-scan benchmark. alpine:3.10 is end-of-life",
+    "since 2021-05; Trivy's current advisory DB surfaces exactly",
+    "one CRITICAL CVE for it (apk-tools buffer overflow,",
+    "CVE-2021-36159). The single-CVE result is not a Trivy bug",
+    "— newer apk-tools CVEs apply to versions that ship in",
+    "later alpine releases, and many old vulns are below the",
+    "default reporting threshold or already filtered as",
+    "duplicates of CVE-2021-36159's class.",
+    "",
+    "We intentionally pin a SINGLE expected CVE rather than a",
+    "broad set: a one-CVE recall check is the strongest signal",
+    "that the image-scanner integration (docker invocation +",
+    "JSON parser + Finding emission) is working end-to-end.",
+    "If the upstream advisory DB ever expands its coverage of",
+    "alpine 3.10, this number should be re-measured rather than",
+    "treated as a regression."
+  ],
+  "expected_vulnerabilities": [
+    {
+      "cve_id": "CVE-2021-36159",
+      "package": "apk-tools",
+      "min_severity": "CRITICAL",
+      "note": "libfetch in alpine 3.10's apk-tools fails to validate Content-Length on HTTP redirects → buffer overflow. Fixed in apk-tools 2.10.7-r0; alpine 3.10 ships 2.10.6-r0 with no upstream patch backport (alpine 3.10 was EOL'd before the fix was issued)."
+    }
+  ]
+}

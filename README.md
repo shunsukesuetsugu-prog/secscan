@@ -21,7 +21,8 @@ secscan all --path .
 | `sast`     | semgrep              | source-level vulnerability patterns                 |
 | `dast`     | OWASP ZAP (Docker)   | live HTTP target probing — baseline + active (Phase 2-J) |
 | `config`   | Trivy (Docker)       | IaC: k8s manifests, Terraform, Dockerfile, Helm (Phase 2-L) |
-| `all`      | every registered scanner | secrets + deps + sast + config (and dast when `dast.target` is configured) |
+| `image`    | Trivy (Docker, image mode) | container image CVEs — OS pkg + language pkg vulns (Phase 2-M) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image when their targets are configured) |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -356,6 +357,78 @@ docker inspect --format='{{index .RepoDigests 0}}' zaproxy/zap-stable:2.15.0
 Set the verified digest under `[dast].image` in `.secscan.toml` (or
 pass it via `--zap-image`).
 
+## Container image scan (Trivy, Phase 2-M)
+
+`secscan image` scans one or more **built** OCI images for known
+CVEs in OS packages (alpine/debian apt/apk/yum DBs) AND in language
+packages embedded in the image (npm/pip/gem/etc.). It catches the
+class of vulnerability that the source-tree scanners
+(`deps`/`sast`/`secrets`) cannot see — for example, an old `openssl`
+shipped in your base image even though your `requirements.txt`
+itself is clean.
+
+```sh
+# Scan a single image. Digest pin (@sha256:...) is mandatory.
+secscan image \
+  --image alpine@sha256:451eee8bedcb2f029756dc3e9d73bab0e7943c1ac55cff3a4861c52a0fdd3e98 \
+  --format sarif --output image.sarif
+
+# Or via config + secscan all
+# .secscan.toml:
+# [image]
+# refs = [
+#   "alpine@sha256:451eee...",
+#   "my-corp/api@sha256:abcdef...",
+# ]
+# platform = "linux/amd64"   # default
+```
+
+Required CLI flags / config:
+
+| Flag                    | Equivalent config key   | Purpose                                          |
+| ----------------------- | ----------------------- | ------------------------------------------------ |
+| `--image <ref>`         | `[image].refs`          | target OCI image (repeatable). Digest pinning is mandatory. |
+| `--trivy-image <ref>`   | `[image].image`         | OCI image ref of the Trivy *scanner* container.  |
+| `--platform <os/arch>`  | `[image].platform`      | docker `--platform` (default `linux/amd64`).     |
+
+Hard requirements baked into the implementation:
+
+- **Both image refs are digest-pinned.** The Trivy scanner image
+  AND every target image must be `<repo>[:tag]@sha256:<64 hex>`.
+  A bare `alpine:3.10` is rejected with a clear error before
+  docker is invoked. This is the same posture as DAST (Phase 2-D)
+  and config (Phase 2-L) — secscan never invokes docker against
+  a mutable tag.
+- **`--platform` is forced on both layers** (docker + Trivy CLI).
+  Without an explicit platform, a multi-arch OCI index digest
+  resolves to different per-arch manifests on different hosts,
+  silently changing what got scanned. We default to
+  `linux/amd64`; override per-deployment via config.
+- **`--cap-drop=ALL --security-opt=no-new-privileges` always.**
+- **`--network=bridge` is mandatory here.** Trivy must reach the
+  registry to pull the target image; `--network=none` is
+  impossible in image mode. The DAST scanner made the same
+  trade-off. `host` networking is NOT allowed.
+- **Opt-in like DAST.** `secscan all` only runs the image scanner
+  when `[image].refs` is non-empty (or `--image` is on the CLI).
+  `secscan image` with zero refs fails loud (exit 2) rather than
+  exiting 0 with no findings — a false-green that would let CI
+  report "image scan clean" when nothing was actually scanned.
+- **Findings are deduped on `(CVE-ID, package, version, location)`.**
+  Scanning two images that ship the same vulnerable package
+  produces ONE finding, not two — so a baseline accept on the
+  CVE silences it across all targets at once.
+
+### Deterministic vs online Trivy DB
+
+By default, every `secscan image` invocation pulls the latest Trivy
+vulnerability DB from ghcr.io. For reproducible bench runs (and any
+offline CI runner), `bench/run.py --image-bench` pre-seeds a named
+docker volume with the DB once and then mounts it read-only +
+`--skip-db-update` for each scan. The end-user CLI doesn't expose a
+cache-volume flag — it's a bench/CI plumbing concern, not an
+everyday operator setting.
+
 ## Detection-rate benchmark
 
 `bench/run.py` measures how much of a curated known-vulnerable
@@ -495,6 +568,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-J   | ZAP active scan opt-in (`--mode=active` + `--dast-active`) | done (v0.11.0)    |
 | 2-L   | Trivy config scan (IaC/k8s/Docker/Helm)             | done (v0.12.0)        |
 | 2-K   | ZAP auth-flow via HTTP header injection (`--auth-header`)  | done (v0.13.0) |
+| 2-M   | container image CVE scan (`secscan image`, Trivy image mode)   | done (v0.14.0) |
 
 ## Development
 

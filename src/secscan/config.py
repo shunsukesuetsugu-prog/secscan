@@ -34,6 +34,8 @@ DEFAULT_SAST_TIMEOUT = 900
 DEFAULT_SECRETS_TIMEOUT = 300
 DEFAULT_DAST_TIMEOUT = 900
 DEFAULT_CONFIG_TIMEOUT = 300
+DEFAULT_IMAGE_TIMEOUT = 600
+DEFAULT_IMAGE_PLATFORM = "linux/amd64"
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -96,6 +98,7 @@ class UnknownSeverityPolicy:
     secrets: str = "fail"
     dast: str = "warn"
     config: str = "warn"
+    image: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -140,6 +143,49 @@ class ConfigScannerConfig:
     """Empty string means "use the pinned default Trivy image"
     (see ``config_scanner/_pinned.py``)."""
     timeout_seconds: int = DEFAULT_CONFIG_TIMEOUT
+
+
+@dataclass(frozen=True)
+class ImageConfig:
+    """Phase 2-M: ``secscan image`` (Trivy image-vulnerability) config.
+
+    Like DAST, the image scanner is **opt-in**: it only runs when
+    ``refs`` is non-empty (either set in ``.secscan.toml`` or passed
+    via ``--image`` on the CLI). With ``refs=()`` the scanner is
+    filtered out of ``secscan all``.
+
+    Every target ref MUST be ``<repo>[:tag]@sha256:<64 hex>`` —
+    digest pinning is enforced in
+    ``secscan.scanners.image.trivy.validate_image_ref``.
+
+    ``platform`` is forced (default ``linux/amd64``) so multi-arch
+    OCI index digests resolve deterministically across hosts. Set
+    ``platform = "linux/arm64"`` (etc.) to scan a different arch's
+    manifest of the same index.
+    """
+
+    refs: tuple[str, ...] = ()
+    """Target image references to scan. Empty → scanner is no-op
+    (opt-in)."""
+
+    image: str = ""
+    """OCI image ref of the Trivy *scanner* container. Empty means
+    'use the pinned default' (see ``scanners/image/_pinned.py``)."""
+
+    platform: str = DEFAULT_IMAGE_PLATFORM
+    """docker ``--platform`` value forwarded to both the docker layer
+    and the Trivy CLI. Mandatory because OCI index digests vary by
+    architecture and we want the same digest to mean the same scan
+    on every host."""
+
+    cache_volume: str = ""
+    """Docker named volume holding a pre-seeded Trivy vulnerability
+    DB. Empty (default): Trivy downloads its DB on every invocation.
+    Non-empty: mounted read-only and combined with
+    ``--skip-db-update`` for deterministic / offline scans (the
+    bench workflow uses this)."""
+
+    timeout_seconds: int = DEFAULT_IMAGE_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -205,6 +251,7 @@ class ProjectConfig:
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     dast: DastConfig = field(default_factory=DastConfig)
     config: ConfigScannerConfig = field(default_factory=ConfigScannerConfig)
+    image: ImageConfig = field(default_factory=ImageConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -281,6 +328,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         secrets=cfg.secrets,
         dast=cfg.dast,
         config=cfg.config,
+        image=cfg.image,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -289,7 +337,9 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
 
 # --- Parsing primitives ----------------------------------------------------
 
-_VALID_SCANNERS = frozenset({"deps", "sast", "secrets", "dast", "config"})
+_VALID_SCANNERS = frozenset(
+    {"deps", "sast", "secrets", "dast", "config", "image"}
+)
 
 
 def _require_table(value: object, name: str) -> dict[str, object]:
@@ -372,6 +422,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
             "secrets",
             "dast",
             "config",
+            "image",
             "baseline",
             "severity_overrides",
         },
@@ -386,6 +437,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     config_scanner = _parse_config_scanner(
         _require_table(raw.get("config"), "config")
     )
+    image_scanner = _parse_image(_require_table(raw.get("image"), "image"))
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -423,6 +475,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         secrets=secrets,
         dast=dast,
         config=config_scanner,
+        image=image_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -432,7 +485,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
 def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
     _reject_unknown(
         table,
-        {"deps", "sast", "secrets", "dast", "config"},
+        {"deps", "sast", "secrets", "dast", "config", "image"},
         "scan.severity_unknown_policy",
     )
     defaults = UnknownSeverityPolicy()
@@ -511,6 +564,48 @@ def _parse_config_scanner(table: dict[str, object]) -> ConfigScannerConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_CONFIG_TIMEOUT),
             "config.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_image(table: dict[str, object]) -> ImageConfig:
+    """Phase 2-M: parse the ``[image]`` section.
+
+    ``refs`` may be omitted (empty default → opt-in skip). Every
+    entry must be a string; the per-ref digest-pin format is
+    enforced at scan time by the ImageScanner validators (so that
+    a typo in one ref doesn't reject the entire config but does
+    surface as a scanner error when that ref is actually scanned).
+    """
+    _reject_unknown(
+        table,
+        {"refs", "image", "platform", "cache_volume", "timeout_seconds"},
+        "image",
+    )
+    raw_refs = _require_str_list(table.get("refs", []), "image.refs")
+    # Codex Phase 2-M diff review: reject blank entries at config
+    # parse time. ``refs = [" "]`` would otherwise pass through to
+    # the dispatcher's truthiness check and silently become a
+    # zero-target scan exiting 0.
+    for i, ref in enumerate(raw_refs):
+        if not ref.strip():
+            raise ConfigError(
+                f"image.refs[{i}] must not be blank — "
+                "remove the entry or replace it with a real image ref"
+            )
+    return ImageConfig(
+        refs=raw_refs,
+        image=_require_str(table.get("image", ""), "image.image"),
+        platform=_require_str(
+            table.get("platform", DEFAULT_IMAGE_PLATFORM), "image.platform"
+        ),
+        cache_volume=_require_str(
+            table.get("cache_volume", ""), "image.cache_volume"
+        ),
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_IMAGE_TIMEOUT),
+            "image.timeout_seconds",
             minimum=1,
         ),
     )

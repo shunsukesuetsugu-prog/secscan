@@ -230,6 +230,28 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
             timeout_seconds=cfg.timeout_seconds,
             extra=MappingProxyType({"image": image}),
         )
+    if scanner_name == "image":
+        # Phase 2-M: Trivy image-vulnerability scan. Local import
+        # so test envs without docker don't pay the import cost.
+        from .scanners.image._pinned import (
+            DEFAULT_TARGET_PLATFORM,
+            DEFAULT_TRIVY_IMAGE,
+        )
+
+        img = config.image
+        scanner_image = img.image.strip() or DEFAULT_TRIVY_IMAGE
+        platform = img.platform.strip() or DEFAULT_TARGET_PLATFORM
+        return ScanConfig(
+            timeout_seconds=img.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    "refs": img.refs,
+                    "scanner_image": scanner_image,
+                    "platform": platform,
+                    "cache_volume": img.cache_volume,
+                }
+            ),
+        )
     if scanner_name == "dast":
         # Local import: the dast package is optional in test envs that
         # don't have docker. Importing at module top would force every

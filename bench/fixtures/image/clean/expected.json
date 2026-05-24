@@ -1,0 +1,24 @@
+{
+  "tool_under_test": "secscan image",
+  "comparison_tool": "trivy image (direct)",
+  "advisory_db_snapshot": "2026-05-24",
+  "platform": "linux/amd64",
+  "image_pinning": {
+    "trivy": "aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e",
+    "target": "alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d",
+    "target_tag_at_pinning_time": "alpine:3.21"
+  },
+  "notes": [
+    "Phase 2-M clean fixture. alpine:3.21 is the current stable",
+    "alpine release as of the pinning date and Trivy emits zero",
+    "CVEs against it — the standard 'this scanner is not crying",
+    "wolf' check.",
+    "",
+    "If a future advisory DB rotation lights up CVEs on this",
+    "image (the upstream alpine project DOES occasionally have",
+    "to issue patches even for stable), bump the pinned digest",
+    "to a newer alpine release rather than treating the fp count",
+    "as a permanent baseline."
+  ],
+  "expected_vulnerabilities": []
+}

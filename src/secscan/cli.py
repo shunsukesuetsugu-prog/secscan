@@ -47,6 +47,7 @@ from .scanners.base import Scanner
 from .scanners.config_scanner import ConfigScanner
 from .scanners.dast import DastScanner
 from .scanners.deps_scanner import DepsScanner
+from .scanners.image import ImageScanner
 from .scanners.sast import SastScanner
 from .scanners.secrets import SecretsScanner
 
@@ -57,6 +58,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     SastScanner,
     DastScanner,
     ConfigScanner,
+    ImageScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -93,8 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # secscan secrets / deps / sast / dast / config / all — share flags.
-    for cmd in ("secrets", "deps", "sast", "dast", "config", "all"):
+    # secscan secrets / deps / sast / dast / config / image / all — share flags.
+    for cmd in ("secrets", "deps", "sast", "dast", "config", "image", "all"):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
         _add_common_scan_args(sub)
         if cmd == "all":
@@ -105,7 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
                 metavar="SCANNER",
                 help=(
                     "scanner to skip (repeatable). Choices: secrets, deps, "
-                    "sast, dast, config."
+                    "sast, dast, config, image."
                 ),
             )
         if cmd == "config":
@@ -116,6 +118,41 @@ def _build_parser() -> argparse.ArgumentParser:
                 help=(
                     "OCI image reference (digest-pinned) for the Trivy "
                     "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+        if cmd == "image":
+            sub.add_argument(
+                "--image",
+                action="append",
+                default=None,
+                metavar="REF",
+                dest="image_refs",
+                help=(
+                    "target OCI image to scan (repeatable). Format: "
+                    "'<repo>[:tag]@sha256:<64 hex>' (digest pinning is "
+                    "required). Unions with [image].refs in .secscan.toml."
+                ),
+            )
+            sub.add_argument(
+                "--trivy-image",
+                default=None,
+                metavar="IMAGE",
+                dest="image_scanner_image",
+                help=(
+                    "OCI image reference (digest-pinned) for the Trivy "
+                    "scanner container. Format: "
+                    "'<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+            sub.add_argument(
+                "--platform",
+                default=None,
+                metavar="OS/ARCH",
+                dest="image_platform",
+                help=(
+                    "docker --platform value (default: linux/amd64). "
+                    "Forwarded to both the docker layer and Trivy so "
+                    "multi-arch index digests resolve deterministically."
                 ),
             )
         if cmd == "sast":
@@ -337,6 +374,25 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             f"build of secscan. Registered scanners: {sorted(_REGISTERED_NAMES)}"
         )
         return int(ExitCode.SCAN_ERROR)
+
+    # Phase 2-M: ``secscan image`` requires at least one non-blank
+    # target ref. Same false-green guard as above: silently scanning
+    # zero images but exiting 0 would let CI report "image scan
+    # clean" when in fact nothing was scanned.
+    #
+    # Codex Phase 2-M diff review: count refs *after* stripping
+    # whitespace and dropping empties — a config-side
+    # ``[image].refs = [" "]`` would otherwise pass tuple-truthiness
+    # and reach the scanner as a no-op.
+    if args.command == "image":
+        non_blank_refs = [r for r in config.image.refs if r and r.strip()]
+        if not non_blank_refs:
+            _print_error(
+                "secscan image requires at least one target image. Pass "
+                "--image '<repo>[:tag]@sha256:<digest>' (repeatable) or "
+                "set [image].refs in .secscan.toml."
+            )
+            return int(ExitCode.SCAN_ERROR)
 
     # For ``secscan all``, the user expects "every kind of check we know
     # about" — secrets + deps + sast. DAST is intentionally NOT in this
@@ -631,6 +687,43 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
     if isinstance(trivy_image, str) and trivy_image:
         new = replace(new, config=replace(new.config, image=trivy_image))
 
+    # Phase 2-M image-scanner CLI overrides. Each is a no-op when the
+    # current subcommand didn't define the argparse field.
+    image_refs = getattr(args, "image_refs", None)
+    if image_refs:
+        # CLI union config (Codex Phase 2-M design pin): an operator running
+        # ``secscan image --image foo`` while ``.secscan.toml`` also has
+        # ``[image].refs = ["bar"]`` should scan BOTH. The scanner
+        # adapter dedupes by ref string so a duplicate is harmless.
+        #
+        # Codex Phase 2-M diff review: strip and drop blank entries
+        # HERE rather than relying on the scanner's later filter.
+        # ``--image "" --image " "`` would otherwise inflate refs
+        # into a non-empty tuple that passes the dispatcher's
+        # "zero refs → usage error" guard, only to be filtered to
+        # empty inside the scanner — producing the silent-pass
+        # false-green the guard exists to prevent.
+        merged: list[str] = list(new.image.refs)
+        for ref in image_refs:
+            if not isinstance(ref, str):
+                continue
+            cleaned = ref.strip()
+            if not cleaned:
+                continue
+            if cleaned not in merged:
+                merged.append(cleaned)
+        new = replace(new, image=replace(new.image, refs=tuple(merged)))
+    image_scanner_image = getattr(args, "image_scanner_image", None)
+    if isinstance(image_scanner_image, str) and image_scanner_image:
+        new = replace(
+            new, image=replace(new.image, image=image_scanner_image)
+        )
+    image_platform = getattr(args, "image_platform", None)
+    if isinstance(image_platform, str) and image_platform:
+        new = replace(
+            new, image=replace(new.image, platform=image_platform)
+        )
+
     auth_headers = getattr(args, "auth_headers", None)
     if auth_headers:
         new = replace(
@@ -664,8 +757,20 @@ def _build_scanner_instances(
     """
     instances: list[Scanner] = []
     target_configured = bool(config.dast.target.strip())
+    image_refs_configured = bool(config.image.refs)
     for cls in ALL_SCANNERS:
         if cls.name == "dast" and not target_configured and command != "dast":
+            continue
+        # Phase 2-M: image scanner is opt-in. In ``secscan all`` we
+        # filter it out unless ``[image].refs`` is non-empty; the
+        # dedicated ``secscan image`` subcommand always instantiates
+        # it so the dispatcher can produce a clear "no refs" error
+        # rather than silently skipping.
+        if (
+            cls.name == "image"
+            and not image_refs_configured
+            and command != "image"
+        ):
             continue
         instances.append(cls())
     return instances

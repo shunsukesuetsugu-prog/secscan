@@ -11,6 +11,7 @@ audit`, `pip-audit`, `gitleaks`, `semgrep`) for parity.
 .venv/bin/python bench/run.py --only deps    # subset
 .venv/bin/python bench/run.py --dast         # include DAST (requires docker + juice-shop fixture)
 .venv/bin/python bench/run.py --dast-authflow  # Phase 2-K: authenticated DAST (logs in, then re-scans with --auth-header)
+.venv/bin/python bench/run.py --image-bench    # Phase 2-M: container image CVE scan (alpine:3.10 vulnerable + alpine:3.21 clean)
 ```
 
 Outputs are committed under `bench/report.md` (human) and
