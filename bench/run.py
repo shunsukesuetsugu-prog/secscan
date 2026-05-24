@@ -989,6 +989,74 @@ def _bench_apifuzz(fixture_dir: Path) -> FixtureResult:
     )
 
 
+def _bench_supply(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-Q: lockfile self-consistency parser bench.
+
+    Loads the committed lockfile (npm/pip/uv) via the secscan
+    supply parser and asserts that the expected rule IDs appear
+    (or zero findings, for the clean fixture). The cosign branch
+    of the supply scanner is NOT included in the default bench
+    because keyless verification requires Sigstore network
+    access; that would belong behind a ``--supply-bench-online``
+    flag in a future iteration.
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    lockfile_name = expected.get("lockfile", "")
+    expected_rule_ids = list(expected.get("expected_rule_ids", []))
+    if not lockfile_name:
+        return FixtureResult(
+            scanner="supply",
+            fixture_name=fixture_dir.name,
+            expected_count=len(expected_rule_ids),
+            detected_count=0,
+            skipped_reason="expected.json missing 'lockfile' field",
+        )
+    lockfile_path = fixture_dir / lockfile_name
+    if not lockfile_path.is_file():
+        return FixtureResult(
+            scanner="supply",
+            fixture_name=fixture_dir.name,
+            expected_count=len(expected_rule_ids),
+            detected_count=0,
+            skipped_reason=f"missing lockfile {lockfile_name}",
+        )
+
+    from secscan.scanners.supply import (
+        check_lockfile,
+        classify_lockfile,
+    )
+
+    try:
+        target = classify_lockfile(str(lockfile_path), scan_root=None)
+    except Exception as exc:
+        return FixtureResult(
+            scanner="supply",
+            fixture_name=fixture_dir.name,
+            expected_count=len(expected_rule_ids),
+            detected_count=0,
+            skipped_reason=f"classify_lockfile failed: {exc}",
+        )
+    parsed = check_lockfile(target)
+    rule_ids = {f.rule_id for f in parsed.findings}
+
+    detected = sum(1 for rid in expected_rule_ids if rid in rule_ids)
+    # FP count: any finding NOT in expected_rule_ids on the clean
+    # fixture counts as a parser false positive.
+    fp = 0
+    if not expected_rule_ids:
+        fp = len(parsed.findings)
+    return FixtureResult(
+        scanner="supply",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_rule_ids),
+        detected_count=detected,
+        false_positive_count=fp,
+        raw_finding_count=len(parsed.findings),
+        comparison_tool="lockfile self-consistency (offline)",
+    )
+
+
 def _bench_iast(fixture_dir: Path) -> FixtureResult:
     """Phase 2-P: parser-regression bench for IAST.
 
@@ -1823,6 +1891,7 @@ def run_all(
     include_sbom: bool = False,
     include_apifuzz: bool = False,
     include_iast: bool = False,
+    include_supply: bool = False,
     include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
@@ -1891,6 +1960,13 @@ def run_all(
                 if not sub.is_dir() or not (sub / "expected.json").exists():
                     continue
                 results.append(_bench_iast(sub))
+    if include_supply:
+        supply_root = SAFE_FIXTURE_ROOT / "supply"
+        if supply_root.is_dir():
+            for sub in sorted(supply_root.iterdir()):
+                if not sub.is_dir() or not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_supply(sub))
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -2058,6 +2134,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--supply-bench",
+        action="store_true",
+        dest="supply_bench",
+        help=(
+            "Phase 2-Q: include supply chain integrity parser "
+            "bench (committed npm package-lock.json fixtures + "
+            "tampered counterpart, lockfile self-consistency only "
+            "— cosign live verification is NOT included in the "
+            "default bench)."
+        ),
+    )
+    parser.add_argument(
         "--iast-bench",
         action="store_true",
         dest="iast_bench",
@@ -2136,6 +2224,7 @@ def main(argv: list[str] | None = None) -> int:
             include_sbom=args.sbom_bench,
             include_apifuzz=args.apifuzz_bench,
             include_iast=args.iast_bench,
+            include_supply=args.supply_bench,
             include_external=args.external,
         )
     except BenchError as exc:

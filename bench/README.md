@@ -15,6 +15,7 @@ audit`, `pip-audit`, `gitleaks`, `semgrep`) for parity.
 .venv/bin/python bench/run.py --sbom-bench     # Phase 2-N: SBOM-based CVE scan via Syft+Grype (committed CycloneDX SBOM fixtures)
 .venv/bin/python bench/run.py --apifuzz-bench  # Phase 2-O: OpenAPI fuzzing parser test (committed Schemathesis NDJSON)
 .venv/bin/python bench/run.py --iast-bench     # Phase 2-P: IAST parser test (committed pyrasp NDJSON + run-id gate verification)
+.venv/bin/python bench/run.py --supply-bench   # Phase 2-Q: supply chain lockfile self-consistency (committed package-lock.json fixtures)
 ```
 
 Outputs are committed under `bench/report.md` (human) and

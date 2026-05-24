@@ -41,6 +41,7 @@ DEFAULT_SBOM_PLATFORM = "linux/amd64"
 DEFAULT_APIFUZZ_TIMEOUT = 1200
 DEFAULT_APIFUZZ_MAX_EXAMPLES = 25
 DEFAULT_IAST_TIMEOUT = 300
+DEFAULT_SUPPLY_TIMEOUT = 120
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -107,6 +108,7 @@ class UnknownSeverityPolicy:
     sbom: str = "warn"
     apifuzz: str = "warn"
     iast: str = "warn"
+    supply: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -312,6 +314,44 @@ class ApifuzzConfig:
 
 
 @dataclass(frozen=True)
+class SupplyVerifyImage:
+    """One ``[[supply.verify_images]]`` table entry."""
+
+    ref: str = ""
+    signer_identity: str = ""
+    signer_identity_regexp: str = ""
+    signer_issuer: str = ""
+
+
+@dataclass(frozen=True)
+class SupplyConfig:
+    """Phase 2-Q: ``secscan supply`` (cosign + lockfile) config.
+
+    Like DAST/image/sbom/apifuzz, the supply scanner is **opt-in**:
+    empty ``verify_images`` AND empty ``lockfiles`` → ``secscan
+    all`` skips. ``secscan supply`` directly with neither set →
+    usage error.
+
+    Config-supplied lockfile paths are confined to the scan root
+    (Codex Phase 2-N MUST-FIX carry-over). CLI-supplied
+    lockfile paths live in a separate ``cli_lockfiles`` slot
+    and are NOT confined — the operator typed the path
+    themselves.
+
+    The ``cosign_image`` override must be digest-pinned (the
+    image-ref validator rejects tag-only refs). Sigstore root
+    cert rotation procedure is documented in
+    ``scanners/supply/_pinned.py``.
+    """
+
+    verify_images: tuple[SupplyVerifyImage, ...] = ()
+    lockfiles: tuple[str, ...] = ()
+    cli_lockfiles: tuple[str, ...] = ()
+    cosign_image: str = ""
+    timeout_seconds: int = DEFAULT_SUPPLY_TIMEOUT
+
+
+@dataclass(frozen=True)
 class IastConfig:
     """Phase 2-P: IAST harness configuration.
 
@@ -407,6 +447,7 @@ class ProjectConfig:
     sbom: SbomConfig = field(default_factory=SbomConfig)
     apifuzz: ApifuzzConfig = field(default_factory=ApifuzzConfig)
     iast: IastConfig = field(default_factory=IastConfig)
+    supply: SupplyConfig = field(default_factory=SupplyConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -487,6 +528,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         sbom=cfg.sbom,
         apifuzz=cfg.apifuzz,
         iast=cfg.iast,
+        supply=cfg.supply,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -506,6 +548,7 @@ _VALID_SCANNERS = frozenset(
         "sbom",
         "apifuzz",
         "iast",
+        "supply",
     }
 )
 
@@ -594,6 +637,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
             "sbom",
             "apifuzz",
             "iast",
+            "supply",
             "baseline",
             "severity_overrides",
         },
@@ -614,6 +658,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         _require_table(raw.get("apifuzz"), "apifuzz")
     )
     iast_scanner = _parse_iast(_require_table(raw.get("iast"), "iast"))
+    supply_scanner = _parse_supply(
+        _require_table(raw.get("supply"), "supply")
+    )
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -655,6 +702,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         sbom=sbom_scanner,
         apifuzz=apifuzz_scanner,
         iast=iast_scanner,
+        supply=supply_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -674,6 +722,7 @@ def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
             "sbom",
             "apifuzz",
             "iast",
+            "supply",
         },
         "scan.severity_unknown_policy",
     )
@@ -847,6 +896,98 @@ def _parse_sbom(table: dict[str, object]) -> SbomConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_SBOM_TIMEOUT),
             "sbom.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_supply(table: dict[str, object]) -> SupplyConfig:
+    """Phase 2-Q: parse the ``[supply]`` section.
+
+    ``[[supply.verify_images]]`` is a TOML array-of-tables; each
+    entry has ``ref`` + ``signer_identity`` (or
+    ``signer_identity_regexp``) + ``signer_issuer``.
+    ``[supply].lockfiles`` is a flat list of file paths the
+    scanner will read for self-consistency.
+    """
+    _reject_unknown(
+        table,
+        {
+            "verify_images",
+            "lockfiles",
+            "cosign_image",
+            "timeout_seconds",
+        },
+        "supply",
+    )
+
+    verify_images_raw = table.get("verify_images", [])
+    if not isinstance(verify_images_raw, list):
+        raise ConfigError("supply.verify_images must be a list")
+    images: list[SupplyVerifyImage] = []
+    for i, entry in enumerate(verify_images_raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"supply.verify_images[{i}] must be a table"
+            )
+        ref = _require_str(entry.get("ref", ""), f"supply.verify_images[{i}].ref")
+        if not ref.strip():
+            raise ConfigError(
+                f"supply.verify_images[{i}].ref must be a non-empty string"
+            )
+        ident = _require_str(
+            entry.get("signer_identity", ""),
+            f"supply.verify_images[{i}].signer_identity",
+        )
+        ident_regex = _require_str(
+            entry.get("signer_identity_regexp", ""),
+            f"supply.verify_images[{i}].signer_identity_regexp",
+        )
+        issuer = _require_str(
+            entry.get("signer_issuer", ""),
+            f"supply.verify_images[{i}].signer_issuer",
+        )
+        if not ident.strip() and not ident_regex.strip():
+            raise ConfigError(
+                f"supply.verify_images[{i}]: one of signer_identity / "
+                "signer_identity_regexp must be set"
+            )
+        if ident.strip() and ident_regex.strip():
+            raise ConfigError(
+                f"supply.verify_images[{i}]: signer_identity and "
+                "signer_identity_regexp are mutually exclusive"
+            )
+        if not issuer.strip():
+            raise ConfigError(
+                f"supply.verify_images[{i}].signer_issuer must be set"
+            )
+        images.append(
+            SupplyVerifyImage(
+                ref=ref.strip(),
+                signer_identity=ident.strip(),
+                signer_identity_regexp=ident_regex.strip(),
+                signer_issuer=issuer.strip(),
+            )
+        )
+
+    lockfiles = _require_str_list(
+        table.get("lockfiles", []), "supply.lockfiles"
+    )
+    for i, lf in enumerate(lockfiles):
+        if not lf.strip():
+            raise ConfigError(
+                f"supply.lockfiles[{i}] must not be blank"
+            )
+
+    return SupplyConfig(
+        verify_images=tuple(images),
+        lockfiles=lockfiles,
+        cosign_image=_require_str(
+            table.get("cosign_image", ""), "supply.cosign_image"
+        ),
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_SUPPLY_TIMEOUT),
+            "supply.timeout_seconds",
             minimum=1,
         ),
     )

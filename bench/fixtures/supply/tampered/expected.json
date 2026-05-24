@@ -1,0 +1,16 @@
+{
+  "tool_under_test": "secscan supply (lockfile self-consistency)",
+  "lockfile": "package-lock.json",
+  "ecosystem": "npm",
+  "expected_rule_ids": [
+    "npm-integrity-mismatch",
+    "npm-non-canonical-registry"
+  ],
+  "notes": [
+    "Phase 2-Q tampered fixture. Same (lodash, 4.17.21) appears",
+    "twice with DIFFERENT integrity values — the strongest",
+    "'lockfile metadata anomaly' signal we can produce offline.",
+    "The second entry also has a resolved URL pointing at a",
+    "non-canonical mirror (LOW supply-chain signal)."
+  ]
+}

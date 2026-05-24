@@ -1,0 +1,12 @@
+{
+  "tool_under_test": "secscan supply (lockfile self-consistency)",
+  "lockfile": "package-lock.json",
+  "ecosystem": "npm",
+  "expected_rule_ids": [],
+  "notes": [
+    "Phase 2-Q clean fixture. A well-formed package-lock.json",
+    "with consistent integrity values and registry.npmjs.org",
+    "resolved URLs. The parser should emit ZERO findings.",
+    "This is the false-positive guard for the lockfile parser."
+  ]
+}

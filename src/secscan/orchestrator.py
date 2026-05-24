@@ -230,6 +230,36 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
             timeout_seconds=cfg.timeout_seconds,
             extra=MappingProxyType({"image": image}),
         )
+    if scanner_name == "supply":
+        # Phase 2-Q: supply chain integrity (cosign + lockfile).
+        # Local import keeps the optional module out of every
+        # orchestrator call.
+        from .scanners.supply._pinned import DEFAULT_COSIGN_IMAGE
+
+        sup = config.supply
+        cosign_image = sup.cosign_image.strip() or DEFAULT_COSIGN_IMAGE
+        verify_dicts = [
+            {
+                "ref": v.ref,
+                "signer_identity": v.signer_identity or None,
+                "signer_identity_regexp": (
+                    v.signer_identity_regexp or None
+                ),
+                "signer_issuer": v.signer_issuer,
+            }
+            for v in sup.verify_images
+        ]
+        return ScanConfig(
+            timeout_seconds=sup.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    "verify_images": tuple(verify_dicts),
+                    "lockfiles": sup.lockfiles,
+                    "cli_lockfiles": sup.cli_lockfiles,
+                    "cosign_image": cosign_image,
+                }
+            ),
+        )
     if scanner_name == "iast":
         # Phase 2-P: IAST harness. Local import to keep the
         # optional subprocess module out of every orchestrator

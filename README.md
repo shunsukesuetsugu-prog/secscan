@@ -25,7 +25,8 @@ secscan all --path .
 | `sbom`     | Syft + Grype (Docker)    | SBOM-based CVE matching: scan a directory / OCI image / existing SBOM file (Phase 2-N) |
 | `apifuzz`  | Schemathesis (Docker)    | OpenAPI fuzzing — sends auto-generated edge-case requests to a live API to find input-validation / spec-conformance / auth bugs (Phase 2-O) |
 | `iast`     | pyrasp (operator-supplied) | runtime IAST harness — spawns the operator's app subprocess, sends canary probes, parses pyrasp event log. **CLI-only**, NEVER in `secscan all` (Phase 2-P) |
-| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom/apifuzz when their targets are configured). **IAST is excluded** — see Phase 2-P notes. |
+| `supply`   | Sigstore cosign + lockfile parsers | container image signature verification (keyless) + lockfile self-consistency (npm / pip / uv) — supply chain integrity gate (Phase 2-Q) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom/apifuzz/supply when their targets are configured). **IAST is excluded** — see Phase 2-P notes. |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -871,6 +872,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-O   | OpenAPI fuzzing (`secscan apifuzz`, Schemathesis) | done (v0.16.0) |
 | 2-P   | IAST harness (`secscan iast`, pyrasp-aware) | done (v0.17.0) |
 | 2-W   | Windows full support (cross-platform: Linux + macOS + Windows) | done (v0.18.0) |
+| 2-Q   | Supply chain integrity (`secscan supply`, cosign + lockfile self-consistency) | done (v0.19.0) |
 
 ## Development
 

@@ -53,6 +53,7 @@ from .scanners.image import ImageScanner
 from .scanners.sast import SastScanner
 from .scanners.sbom import SbomScanner
 from .scanners.secrets import SecretsScanner
+from .scanners.supply import SupplyScanner
 
 # Registry of scanners available in this build.
 ALL_SCANNERS: list[type[Scanner]] = [
@@ -65,6 +66,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     SbomScanner,
     ApifuzzScanner,
     IastScanner,
+    SupplyScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -113,6 +115,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "sbom",
         "apifuzz",
         "iast",
+        "supply",
         "all",
     ):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
@@ -137,6 +140,71 @@ def _build_parser() -> argparse.ArgumentParser:
                 help=(
                     "OCI image reference (digest-pinned) for the Trivy "
                     "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+        if cmd == "supply":
+            sub.add_argument(
+                "--verify-image",
+                action="append",
+                default=None,
+                metavar="REF",
+                dest="supply_verify_image",
+                help=(
+                    "Target OCI image to cosign-verify (repeatable). "
+                    "Digest-pinned form required. Pair with "
+                    "--signer-identity and --signer-issuer."
+                ),
+            )
+            sub.add_argument(
+                "--signer-identity",
+                default=None,
+                metavar="ID",
+                dest="supply_signer_identity",
+                help=(
+                    "cosign --certificate-identity (literal match). "
+                    "Applied to the LAST --verify-image."
+                ),
+            )
+            sub.add_argument(
+                "--signer-identity-regexp",
+                default=None,
+                metavar="REGEX",
+                dest="supply_signer_identity_regexp",
+                help=(
+                    "cosign --certificate-identity-regexp. CLI-only, "
+                    "opt-in alternative to --signer-identity."
+                ),
+            )
+            sub.add_argument(
+                "--signer-issuer",
+                default=None,
+                metavar="URL",
+                dest="supply_signer_issuer",
+                help=(
+                    "cosign --certificate-oidc-issuer (e.g. "
+                    "https://token.actions.githubusercontent.com)."
+                ),
+            )
+            sub.add_argument(
+                "--check-lockfile",
+                action="append",
+                default=None,
+                metavar="PATH",
+                dest="supply_check_lockfile",
+                help=(
+                    "Lockfile to check for self-consistency "
+                    "(repeatable). Supports package-lock.json, "
+                    "Pipfile.lock, uv.lock."
+                ),
+            )
+            sub.add_argument(
+                "--cosign-image",
+                default=None,
+                metavar="IMAGE",
+                dest="supply_cosign_image",
+                help=(
+                    "OCI image reference (digest-pinned) for the "
+                    "Sigstore cosign container."
                 ),
             )
         if cmd == "iast":
@@ -654,6 +722,31 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             )
             return int(ExitCode.SCAN_ERROR)
 
+    # Phase 2-Q: ``secscan supply`` requires at least one
+    # verify-image OR one --check-lockfile. Both empty → usage
+    # error (same false-green guard as image / sbom).
+    if args.command == "supply":
+        n_verify = len(
+            [v for v in config.supply.verify_images if v.ref.strip()]
+        )
+        n_locks = len(
+            [
+                lf
+                for lf in (
+                    *config.supply.lockfiles,
+                    *config.supply.cli_lockfiles,
+                )
+                if lf.strip()
+            ]
+        )
+        if n_verify == 0 and n_locks == 0:
+            _print_error(
+                "secscan supply requires at least one --verify-image "
+                "(with --signer-identity + --signer-issuer) or one "
+                "--check-lockfile. Both empty → nothing to scan."
+            )
+            return int(ExitCode.SCAN_ERROR)
+
     # Phase 2-O: ``secscan apifuzz`` requires both api-url AND
     # schema. Either missing → usage error (same false-green guard
     # as image / sbom).
@@ -1141,6 +1234,58 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
             new, iast=replace(new.iast, app_ready_timeout=float(iast_ready))
         )
 
+    # Phase 2-Q supply chain CLI overrides. ``--verify-image`` +
+    # ``--signer-identity`` + ``--signer-issuer`` together form
+    # ONE verification (the last triple applies). Multiple
+    # invocations require repeating all three flags; secscan
+    # treats each ``--verify-image`` instance as a separate
+    # entry pulling the matching signer flags.
+    sup_imgs = getattr(args, "supply_verify_image", None)
+    sup_ident = getattr(args, "supply_signer_identity", None)
+    sup_ident_re = getattr(args, "supply_signer_identity_regexp", None)
+    sup_issuer = getattr(args, "supply_signer_issuer", None)
+    if sup_imgs:
+        from .config import SupplyVerifyImage
+
+        merged_imgs: list[SupplyVerifyImage] = list(new.supply.verify_images)
+        for ref in sup_imgs:
+            if not isinstance(ref, str) or not ref.strip():
+                continue
+            merged_imgs.append(
+                SupplyVerifyImage(
+                    ref=ref.strip(),
+                    signer_identity=(sup_ident or "").strip(),
+                    signer_identity_regexp=(sup_ident_re or "").strip(),
+                    signer_issuer=(sup_issuer or "").strip(),
+                )
+            )
+        new = replace(
+            new, supply=replace(new.supply, verify_images=tuple(merged_imgs))
+        )
+
+    sup_locks = getattr(args, "supply_check_lockfile", None)
+    if sup_locks:
+        # CLI-origin lockfiles bypass scan-root confinement —
+        # they go into a separate ``cli_lockfiles`` slot
+        # (Codex Phase 2-Q design review carry-over).
+        merged_locks = list(new.supply.cli_lockfiles)
+        for lf in sup_locks:
+            if not isinstance(lf, str) or not lf.strip():
+                continue
+            stripped = lf.strip()
+            if stripped not in merged_locks:
+                merged_locks.append(stripped)
+        new = replace(
+            new,
+            supply=replace(new.supply, cli_lockfiles=tuple(merged_locks)),
+        )
+
+    sup_cosign_image = getattr(args, "supply_cosign_image", None)
+    if isinstance(sup_cosign_image, str) and sup_cosign_image:
+        new = replace(
+            new, supply=replace(new.supply, cosign_image=sup_cosign_image)
+        )
+
     auth_headers = getattr(args, "auth_headers", None)
     if auth_headers:
         new = replace(
@@ -1219,6 +1364,15 @@ def _build_scanner_instances(
         # instantiates this scanner.
         if cls.name == "iast" and command != "iast":
             continue
+        # Phase 2-Q: supply chain integrity is opt-in. ``secscan
+        # all`` skips it unless [supply].verify_images or
+        # [supply].lockfiles is configured.
+        if cls.name == "supply" and command != "supply":
+            supply_configured = bool(
+                config.supply.verify_images or config.supply.lockfiles
+            )
+            if not supply_configured:
+                continue
         instances.append(cls())
     return instances
 
