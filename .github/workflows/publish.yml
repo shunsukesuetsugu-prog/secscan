@@ -11,7 +11,7 @@ name: Publish to PyPI
 #      ``secscan`` project.
 #   2. Account settings → "Publishing" → "Add a new pending
 #      publisher" with:
-#        - PyPI Project Name: pysecscan
+#        - PyPI Project Name: shun-secscan
 #        - Owner:             shunsukesuetsugu-prog
 #        - Repository name:   secscan
 #        - Workflow name:     publish.yml
@@ -25,6 +25,13 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # ``workflow_dispatch`` lets the maintainer re-run a publish
+  # after fixing setup-side issues (e.g. a typo in the Pending
+  # Publisher) without having to cut a fresh release for the
+  # same version. The ``release.published`` event fires once
+  # per release; if the workflow fails on that one shot, this
+  # is the recovery path.
+  workflow_dispatch:
 
 jobs:
   build-and-publish:
@@ -35,7 +42,7 @@ jobs:
     # checkbox lets the maintainer cancel a misfired release.
     environment:
       name: pypi
-      url: https://pypi.org/project/pysecscan/
+      url: https://pypi.org/project/shun-secscan/
     permissions:
       # Required for Trusted Publisher: GitHub mints a short-
       # lived OIDC token that PyPI exchanges for an upload

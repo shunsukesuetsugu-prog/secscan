@@ -38,13 +38,15 @@ Requires Python 3.11 or newer.
 ### From PyPI
 
 ```sh
-pip install pysecscan          # installs the ``secscan`` command
-pip install "pysecscan[sast,deps]"  # + bundled semgrep / pip-audit
+pip install shun-secscan          # installs the ``secscan`` command
+pip install "shun-secscan[sast,deps]"  # + bundled semgrep / pip-audit
 ```
 
-The PyPI *distribution* name is `pysecscan` (the bare `secscan`
-was unavailable on PyPI; see the note in `pyproject.toml`). The
-CLI command and Python import name are still `secscan`.
+The PyPI *distribution* name is `shun-secscan` (the bare `secscan`
+and the `py-` prefix variant were both blocked by PyPI's similarity
+gate against an unrelated `secscan-cli` package — see the note in
+`pyproject.toml`). The CLI command and Python import name are
+still `secscan`.
 
 ### From source
 
@@ -960,7 +962,7 @@ project root.
 ## Windows support (Phase 2-W)
 
 secscan v0.18.0 runs natively on Linux, macOS, **and Windows**.
-The `pip install pysecscan` flow is identical across OSes; CI tests
+The `pip install shun-secscan` flow is identical across OSes; CI tests
 all three via a GitHub Actions matrix.
 
 ### What works the same on every OS
