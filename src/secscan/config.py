@@ -38,6 +38,8 @@ DEFAULT_IMAGE_TIMEOUT = 600
 DEFAULT_IMAGE_PLATFORM = "linux/amd64"
 DEFAULT_SBOM_TIMEOUT = 900
 DEFAULT_SBOM_PLATFORM = "linux/amd64"
+DEFAULT_APIFUZZ_TIMEOUT = 1200
+DEFAULT_APIFUZZ_MAX_EXAMPLES = 25
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -102,6 +104,7 @@ class UnknownSeverityPolicy:
     config: str = "warn"
     image: str = "warn"
     sbom: str = "warn"
+    apifuzz: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -251,6 +254,62 @@ class SbomConfig:
 
 
 @dataclass(frozen=True)
+class ApifuzzConfig:
+    """Phase 2-O: ``secscan apifuzz`` (Schemathesis) configuration.
+
+    Like DAST/image/sbom, the apifuzz scanner is **opt-in**: it
+    only runs when ``api_url`` AND ``schema`` are both set (via
+    ``.secscan.toml`` or the CLI). With either field empty the
+    scanner is filtered out of ``secscan all``.
+
+    ``mode`` is ``baseline`` (read-only GET/HEAD/OPTIONS) by
+    default. Setting it to ``active`` in config does NOT enable
+    POST/PUT/PATCH/DELETE fuzzing on its own — the operator must
+    additionally pass ``--allow-active`` on the CLI (Codex Phase
+    2-O design review MUST-FIX #2). This split prevents an
+    attacker-controlled ``.secscan.toml`` from silently enabling
+    destructive fuzzing against a target.
+
+    Headers are repeated ``"Name: Value"`` strings; the same
+    validator (Phase 2-K) is used as for ``[dast].auth_headers``.
+    """
+
+    api_url: str = ""
+    schema: str = ""
+    mode: str = "baseline"
+    headers: tuple[str, ...] = ()
+    scanner_image: str = ""
+    helper_image: str = ""
+    max_examples: int = DEFAULT_APIFUZZ_MAX_EXAMPLES
+    seed: int | None = None
+    deterministic: bool = False
+    request_timeout: float = 5.0
+    timeout_seconds: int = DEFAULT_APIFUZZ_TIMEOUT
+
+    allow_active: bool = False
+    """**CLI-only** second opt-in for ``mode = "active"``.
+
+    Codex Phase 2-O design review MUST-FIX #2: the config parser
+    does NOT accept this key; ``_apply_cli_overrides`` is the
+    only writer. With ``mode = "active"`` from .secscan.toml plus
+    ``allow_active=False``, the scanner errors out — preventing
+    an attacker-controlled config from silently enabling
+    destructive fuzzing."""
+
+    schema_from_cli: bool = False
+    """Track origin of the schema for per-origin scan-root
+    confinement (Phase 2-N pattern). False when the schema came
+    from ``[apifuzz].schema`` in config; True when ``--schema``
+    was passed on the CLI."""
+
+    unconfine_cli_schema: bool = False
+    """**CLI-only**. When True (set via
+    ``--unsafe-allow-schema-outside-scan-root``), a CLI-supplied
+    schema file may live outside the scan root. Config-supplied
+    schemas are ALWAYS confined regardless of this flag."""
+
+
+@dataclass(frozen=True)
 class DastConfig:
     """Phase 2-D DAST scanner configuration.
 
@@ -315,6 +374,7 @@ class ProjectConfig:
     config: ConfigScannerConfig = field(default_factory=ConfigScannerConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
     sbom: SbomConfig = field(default_factory=SbomConfig)
+    apifuzz: ApifuzzConfig = field(default_factory=ApifuzzConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -393,6 +453,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         config=cfg.config,
         image=cfg.image,
         sbom=cfg.sbom,
+        apifuzz=cfg.apifuzz,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -402,7 +463,16 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
 # --- Parsing primitives ----------------------------------------------------
 
 _VALID_SCANNERS = frozenset(
-    {"deps", "sast", "secrets", "dast", "config", "image", "sbom"}
+    {
+        "deps",
+        "sast",
+        "secrets",
+        "dast",
+        "config",
+        "image",
+        "sbom",
+        "apifuzz",
+    }
 )
 
 
@@ -488,6 +558,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
             "config",
             "image",
             "sbom",
+            "apifuzz",
             "baseline",
             "severity_overrides",
         },
@@ -504,6 +575,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     )
     image_scanner = _parse_image(_require_table(raw.get("image"), "image"))
     sbom_scanner = _parse_sbom(_require_table(raw.get("sbom"), "sbom"))
+    apifuzz_scanner = _parse_apifuzz(
+        _require_table(raw.get("apifuzz"), "apifuzz")
+    )
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -543,6 +617,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         config=config_scanner,
         image=image_scanner,
         sbom=sbom_scanner,
+        apifuzz=apifuzz_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -552,7 +627,16 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
 def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
     _reject_unknown(
         table,
-        {"deps", "sast", "secrets", "dast", "config", "image", "sbom"},
+        {
+            "deps",
+            "sast",
+            "secrets",
+            "dast",
+            "config",
+            "image",
+            "sbom",
+            "apifuzz",
+        },
         "scan.severity_unknown_policy",
     )
     defaults = UnknownSeverityPolicy()
@@ -725,6 +809,89 @@ def _parse_sbom(table: dict[str, object]) -> SbomConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_SBOM_TIMEOUT),
             "sbom.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_apifuzz(table: dict[str, object]) -> ApifuzzConfig:
+    """Phase 2-O: parse the ``[apifuzz]`` section.
+
+    Codex Phase 2-O design review MUST-FIX (security): there is
+    NO ``allow_active`` key in config — that gate is CLI-only.
+    ``mode = "active"`` in config sets the *intent*; the operator
+    must still pass ``--allow-active`` for the scanner to actually
+    fire mutating requests.
+    """
+    _reject_unknown(
+        table,
+        {
+            "api_url",
+            "schema",
+            "mode",
+            "headers",
+            "scanner_image",
+            "helper_image",
+            "max_examples",
+            "seed",
+            "deterministic",
+            "request_timeout",
+            "timeout_seconds",
+        },
+        "apifuzz",
+    )
+    mode = _require_str(table.get("mode", "baseline"), "apifuzz.mode")
+    if mode not in ("baseline", "active"):
+        raise ConfigError(
+            f"apifuzz.mode: must be 'baseline' or 'active' (got {mode!r})"
+        )
+    headers = _require_str_list(
+        table.get("headers", []), "apifuzz.headers"
+    )
+
+    raw_seed = table.get("seed")
+    seed: int | None
+    if raw_seed is None:
+        seed = None
+    elif isinstance(raw_seed, int) and not isinstance(raw_seed, bool):
+        seed = raw_seed
+    else:
+        raise ConfigError("apifuzz.seed must be an integer")
+
+    request_timeout_raw = table.get("request_timeout", 5.0)
+    if (
+        not isinstance(request_timeout_raw, (int, float))
+        or isinstance(request_timeout_raw, bool)
+        or request_timeout_raw <= 0
+    ):
+        raise ConfigError(
+            "apifuzz.request_timeout must be a positive number"
+        )
+
+    return ApifuzzConfig(
+        api_url=_require_str(table.get("api_url", ""), "apifuzz.api_url"),
+        schema=_require_str(table.get("schema", ""), "apifuzz.schema"),
+        mode=mode,
+        headers=headers,
+        scanner_image=_require_str(
+            table.get("scanner_image", ""), "apifuzz.scanner_image"
+        ),
+        helper_image=_require_str(
+            table.get("helper_image", ""), "apifuzz.helper_image"
+        ),
+        max_examples=_require_int(
+            table.get("max_examples", DEFAULT_APIFUZZ_MAX_EXAMPLES),
+            "apifuzz.max_examples",
+            minimum=1,
+        ),
+        seed=seed,
+        deterministic=_require_bool(
+            table.get("deterministic", False), "apifuzz.deterministic"
+        ),
+        request_timeout=float(request_timeout_raw),
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_APIFUZZ_TIMEOUT),
+            "apifuzz.timeout_seconds",
             minimum=1,
         ),
     )

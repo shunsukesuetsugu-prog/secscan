@@ -1,0 +1,61 @@
+{
+  "tool_under_test": "secscan apifuzz",
+  "comparison_tool": "schemathesis (direct, against the same NDJSON report)",
+  "advisory_db_snapshot": "2026-05-24",
+  "report_file": "report.ndjson",
+  "report_provenance": {
+    "generator": "schemathesis/schemathesis@sha256:abd96924cce31cc72f3449266dde5c5c927f528a6c7184ac69893ddcf4fe85dc",
+    "target_api": "https://petstore3.swagger.io/api/v3",
+    "schema_url": "https://petstore3.swagger.io/api/v3/openapi.json",
+    "generated_at": "2026-05-24",
+    "schemathesis_version": "4.19.0",
+    "max_examples": 2,
+    "seed_note": [
+      "The NDJSON was generated with --max-examples 2 against the",
+      "publicly-hosted petstore3 demo to keep the fixture small",
+      "(~300 KiB). Hypothesis's default seed varies, but the report",
+      "captures one stable snapshot — re-running schemathesis against",
+      "the live demo will produce a slightly different set due to",
+      "petstore3 server state drift, so we pin THIS report instead",
+      "of regenerating per bench run (Codex Phase 2-O MUST-FIX #5)."
+    ]
+  },
+  "notes": [
+    "Phase 2-O parser/bench fixture. The committed NDJSON exercises",
+    "real Schemathesis output structure (Initialize / EngineStarted",
+    "/ SuiteStarted / PhaseStarted / ScenarioStarted / Scenario-",
+    "Finished events with full recorder.{cases,checks,interactions}",
+    "blocks). The bench measures that secscan's parser surfaces the",
+    "expected check names — the same set Schemathesis itself prints",
+    "in its summary.",
+    "",
+    "Live bench against a running petstore3 container is intentionally",
+    "NOT part of the default bench: swaggerapi/petstore3:1.0.16 is",
+    "linux/amd64-only and times out under Rosetta on Apple Silicon",
+    "even after 200 seconds (verified during Phase 2-O smoke). The",
+    "committed-report approach gives a deterministic parser test",
+    "without needing a working petstore3 launcher."
+  ],
+  "expected_checks": [
+    {
+      "name": "not_a_server_error",
+      "min_severity": "HIGH",
+      "note": "5xx responses — almost always real bugs; petstore3 throws Server Error on malformed inputs to POST /pet, DELETE /pet/{petId}, etc."
+    },
+    {
+      "name": "ignored_auth",
+      "min_severity": "HIGH",
+      "note": "endpoints that should require auth but accepted anonymous requests"
+    },
+    {
+      "name": "unsupported_method",
+      "min_severity": "MEDIUM",
+      "note": "endpoints accepting methods not declared in the OpenAPI spec"
+    },
+    {
+      "name": "response_schema_conformance",
+      "min_severity": "MEDIUM",
+      "note": "response body shape didn't match the spec"
+    }
+  ]
+}

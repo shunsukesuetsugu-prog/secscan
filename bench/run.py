@@ -931,6 +931,64 @@ def _bench_sbom(fixture_dir: Path) -> FixtureResult:
     )
 
 
+def _bench_apifuzz(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-O: parser-regression bench for apifuzz.
+
+    Unlike other benches, this one does NOT spawn the scanner
+    container — it loads the committed Schemathesis NDJSON report
+    directly through the parser. Reason: swaggerapi/petstore3 is
+    linux/amd64-only and fails to boot under Rosetta on Apple
+    Silicon (verified during Phase 2-O smoke); a live bench would
+    be CI-unfriendly. The committed NDJSON is a real Schemathesis
+    4.19 run against the publicly-hosted petstore3 demo, captured
+    once and frozen here (Codex Phase 2-O design review MUST-FIX
+    #5 — fixed seed, no live network dependency).
+
+    Recall = unique check names from ``expected_checks`` that
+    appear in the parser output.
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    report_filename = expected.get("report_file", "report.ndjson")
+    report_path = fixture_dir / report_filename
+    if not report_path.is_file():
+        return FixtureResult(
+            scanner="apifuzz",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=f"missing NDJSON fixture {report_filename}",
+        )
+
+    # Parser is pure Python — no docker required.
+    from secscan.scanners.apifuzz import parse_ndjson_report
+
+    api_url = (
+        expected.get("report_provenance", {}).get("target_api", "")
+    )
+    with open(report_path, "rb") as f:
+        parsed = parse_ndjson_report(f.read(), api_url=api_url)
+
+    expected_check_names = [
+        e["name"]
+        for e in expected.get("expected_checks", [])
+        if isinstance(e, dict) and e.get("name")
+    ]
+    detected_names = {f.rule_id for f in parsed.findings}
+    detected = sum(
+        1 for name in expected_check_names if name in detected_names
+    )
+    return FixtureResult(
+        scanner="apifuzz",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_check_names),
+        detected_count=detected,
+        false_positive_count=0,
+        raw_finding_count=len(parsed.findings),
+        comparison_tool="schemathesis (committed NDJSON)",
+    )
+
+
 def _bench_external(fixture_dir: Path) -> FixtureResult:
     """Phase 2-I dispatcher: SAST → ``_bench_external_sast``,
     secrets → ``_bench_external_secrets``."""
@@ -1697,6 +1755,7 @@ def run_all(
     include_dast_authflow: bool = False,
     include_image: bool = False,
     include_sbom: bool = False,
+    include_apifuzz: bool = False,
     include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
@@ -1751,6 +1810,13 @@ def run_all(
                 if not sub.is_dir() or not (sub / "expected.json").exists():
                     continue
                 results.append(_bench_sbom(sub))
+    if include_apifuzz:
+        apifuzz_root = SAFE_FIXTURE_ROOT / "apifuzz"
+        if apifuzz_root.is_dir():
+            for sub in sorted(apifuzz_root.iterdir()):
+                if not sub.is_dir() or not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_apifuzz(sub))
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -1918,6 +1984,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--apifuzz-bench",
+        action="store_true",
+        dest="apifuzz_bench",
+        help=(
+            "Phase 2-O: include OpenAPI-fuzzing parser bench "
+            "(loads committed Schemathesis NDJSON, runs it through "
+            "the secscan parser, asserts expected check names. "
+            "Live Schemathesis run is NOT part of the default "
+            "bench — petstore3 sample app is amd64-only and "
+            "Rosetta-incompatible)."
+        ),
+    )
+    parser.add_argument(
         "--sbom-bench",
         action="store_true",
         dest="sbom_bench",
@@ -1969,6 +2048,7 @@ def main(argv: list[str] | None = None) -> int:
             include_dast_authflow=args.dast_authflow,
             include_image=args.image_bench,
             include_sbom=args.sbom_bench,
+            include_apifuzz=args.apifuzz_bench,
             include_external=args.external,
         )
     except BenchError as exc:

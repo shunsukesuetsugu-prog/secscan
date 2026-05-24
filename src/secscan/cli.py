@@ -43,6 +43,7 @@ from .models import Severity
 from .orchestrator import run_scanners
 from .path_safety import PathSafetyError, resolve_scan_root
 from .runner import SubprocessCommandRunner
+from .scanners.apifuzz import ApifuzzScanner
 from .scanners.base import Scanner
 from .scanners.config_scanner import ConfigScanner
 from .scanners.dast import DastScanner
@@ -61,6 +62,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     ConfigScanner,
     ImageScanner,
     SbomScanner,
+    ApifuzzScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -97,7 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # secscan secrets / deps / sast / dast / config / image / sbom / all
+    # secscan secrets / deps / sast / dast / config / image / sbom /
+    # apifuzz / all
     for cmd in (
         "secrets",
         "deps",
@@ -106,6 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "config",
         "image",
         "sbom",
+        "apifuzz",
         "all",
     ):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
@@ -118,7 +122,7 @@ def _build_parser() -> argparse.ArgumentParser:
                 metavar="SCANNER",
                 help=(
                     "scanner to skip (repeatable). Choices: secrets, deps, "
-                    "sast, dast, config, image, sbom."
+                    "sast, dast, config, image, sbom, apifuzz."
                 ),
             )
         if cmd == "config":
@@ -129,6 +133,105 @@ def _build_parser() -> argparse.ArgumentParser:
                 help=(
                     "OCI image reference (digest-pinned) for the Trivy "
                     "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+        if cmd == "apifuzz":
+            sub.add_argument(
+                "--api-url",
+                default=None,
+                metavar="URL",
+                dest="apifuzz_api_url",
+                help=(
+                    "Base URL of the live API to fuzz (http:// or "
+                    "https://). Required. No query/fragment/userinfo."
+                ),
+            )
+            sub.add_argument(
+                "--schema",
+                default=None,
+                metavar="PATH_OR_URL",
+                dest="apifuzz_schema",
+                help=(
+                    "OpenAPI schema source: http(s):// URL or local "
+                    "file (.yaml / .yml / .json). Required."
+                ),
+            )
+            sub.add_argument(
+                "--mode",
+                choices=("baseline", "active"),
+                default=None,
+                dest="apifuzz_mode",
+                help=(
+                    "Schemathesis test method scope. 'baseline' = "
+                    "GET/HEAD/OPTIONS only (safe for production). "
+                    "'active' = all methods (DESTRUCTIVE — requires "
+                    "--allow-active)."
+                ),
+            )
+            sub.add_argument(
+                "--allow-active",
+                action="store_true",
+                dest="apifuzz_allow_active",
+                help=(
+                    "CLI-only second opt-in for --mode=active. Cannot "
+                    "be set from config. Active mode sends POST/PUT/"
+                    "PATCH/DELETE which mutates target state — do NOT "
+                    "point at production."
+                ),
+            )
+            sub.add_argument(
+                "--auth-header",
+                action="append",
+                default=None,
+                metavar='"Name: Value"',
+                dest="apifuzz_auth_headers",
+                help=(
+                    "HTTP header to inject into every Schemathesis "
+                    "request (repeatable). e.g. --auth-header "
+                    "'Authorization: Bearer <jwt>'. Same validator as "
+                    "Phase 2-K DAST."
+                ),
+            )
+            sub.add_argument(
+                "--schemathesis-image",
+                default=None,
+                metavar="IMAGE",
+                dest="apifuzz_scanner_image",
+                help=(
+                    "OCI image reference (digest-pinned) for the "
+                    "Schemathesis container."
+                ),
+            )
+            sub.add_argument(
+                "--max-examples",
+                type=int,
+                default=None,
+                metavar="N",
+                dest="apifuzz_max_examples",
+                help=(
+                    "Maximum number of generated test cases per API "
+                    "operation (Schemathesis --max-examples)."
+                ),
+            )
+            sub.add_argument(
+                "--seed",
+                type=int,
+                default=None,
+                metavar="N",
+                dest="apifuzz_seed",
+                help=(
+                    "Fixed Hypothesis seed for reproducible runs "
+                    "(Schemathesis --seed)."
+                ),
+            )
+            sub.add_argument(
+                "--unsafe-allow-schema-outside-scan-root",
+                action="store_true",
+                dest="apifuzz_unsafe_allow_outside_scan_root",
+                help=(
+                    "Allow a CLI-supplied schema FILE that lives "
+                    "outside the scan root. CONFIG-supplied schema "
+                    "files are ALWAYS confined to the scan root."
                 ),
             )
         if cmd == "sbom":
@@ -460,6 +563,23 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
                 "secscan image requires at least one target image. Pass "
                 "--image '<repo>[:tag]@sha256:<digest>' (repeatable) or "
                 "set [image].refs in .secscan.toml."
+            )
+            return int(ExitCode.SCAN_ERROR)
+
+    # Phase 2-O: ``secscan apifuzz`` requires both api-url AND
+    # schema. Either missing → usage error (same false-green guard
+    # as image / sbom).
+    if args.command == "apifuzz":
+        if not config.apifuzz.api_url.strip():
+            _print_error(
+                "secscan apifuzz requires --api-url (or "
+                "[apifuzz].api_url in .secscan.toml)."
+            )
+            return int(ExitCode.SCAN_ERROR)
+        if not config.apifuzz.schema.strip():
+            _print_error(
+                "secscan apifuzz requires --schema "
+                "(http(s):// URL or local file)."
             )
             return int(ExitCode.SCAN_ERROR)
 
@@ -858,6 +978,61 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
             new, sbom=replace(new.sbom, unconfine_cli_targets=True)
         )
 
+    # Phase 2-O apifuzz CLI overrides.
+    af_api_url = getattr(args, "apifuzz_api_url", None)
+    if isinstance(af_api_url, str) and af_api_url:
+        new = replace(new, apifuzz=replace(new.apifuzz, api_url=af_api_url))
+    af_schema = getattr(args, "apifuzz_schema", None)
+    if isinstance(af_schema, str) and af_schema:
+        # Codex Phase 2-N MUST-FIX (security) carry-over: mark the
+        # schema as CLI-origin so the scanner adapter can apply the
+        # CLI-only unconfine flag without affecting any config-
+        # supplied schema that was already set.
+        new = replace(
+            new,
+            apifuzz=replace(
+                new.apifuzz, schema=af_schema, schema_from_cli=True
+            ),
+        )
+    af_mode = getattr(args, "apifuzz_mode", None)
+    if isinstance(af_mode, str) and af_mode:
+        new = replace(new, apifuzz=replace(new.apifuzz, mode=af_mode))
+    af_scanner_image = getattr(args, "apifuzz_scanner_image", None)
+    if isinstance(af_scanner_image, str) and af_scanner_image:
+        new = replace(
+            new, apifuzz=replace(new.apifuzz, scanner_image=af_scanner_image)
+        )
+    af_max_examples = getattr(args, "apifuzz_max_examples", None)
+    if isinstance(af_max_examples, int) and af_max_examples > 0:
+        new = replace(
+            new, apifuzz=replace(new.apifuzz, max_examples=af_max_examples)
+        )
+    af_seed = getattr(args, "apifuzz_seed", None)
+    if isinstance(af_seed, int) and not isinstance(af_seed, bool):
+        new = replace(new, apifuzz=replace(new.apifuzz, seed=af_seed))
+    af_auth = getattr(args, "apifuzz_auth_headers", None)
+    if af_auth:
+        merged_h: list[str] = list(new.apifuzz.headers)
+        for h in af_auth:
+            if not isinstance(h, str):
+                continue
+            cleaned = h.strip()
+            if cleaned and cleaned not in merged_h:
+                merged_h.append(cleaned)
+        new = replace(
+            new, apifuzz=replace(new.apifuzz, headers=tuple(merged_h))
+        )
+    if getattr(args, "apifuzz_allow_active", False):
+        # Codex Phase 2-O design review MUST-FIX #2: ``allow_active``
+        # is CLI-only. The config parser cannot set it; only this
+        # override path can. ``mode = "active"`` in config without
+        # this CLI flag will fail the scanner's mode validator.
+        new = replace(new, apifuzz=replace(new.apifuzz, allow_active=True))
+    if getattr(args, "apifuzz_unsafe_allow_outside_scan_root", False):
+        new = replace(
+            new, apifuzz=replace(new.apifuzz, unconfine_cli_schema=True)
+        )
+
     auth_headers = getattr(args, "auth_headers", None)
     if auth_headers:
         new = replace(
@@ -895,6 +1070,9 @@ def _build_scanner_instances(
     sbom_targets_configured = bool(
         config.sbom.targets or config.sbom.cli_targets
     )
+    apifuzz_configured = bool(
+        config.apifuzz.api_url.strip() and config.apifuzz.schema.strip()
+    )
     for cls in ALL_SCANNERS:
         if cls.name == "dast" and not target_configured and command != "dast":
             continue
@@ -914,6 +1092,16 @@ def _build_scanner_instances(
             cls.name == "sbom"
             and not sbom_targets_configured
             and command != "sbom"
+        ):
+            continue
+        # Phase 2-O: apifuzz is opt-in. Requires BOTH api_url and
+        # schema. If either is missing, skip in ``secscan all``;
+        # the dispatcher's separate guard handles the direct
+        # ``secscan apifuzz`` case.
+        if (
+            cls.name == "apifuzz"
+            and not apifuzz_configured
+            and command != "apifuzz"
         ):
             continue
         instances.append(cls())

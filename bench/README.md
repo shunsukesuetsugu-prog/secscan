@@ -13,6 +13,7 @@ audit`, `pip-audit`, `gitleaks`, `semgrep`) for parity.
 .venv/bin/python bench/run.py --dast-authflow  # Phase 2-K: authenticated DAST (logs in, then re-scans with --auth-header)
 .venv/bin/python bench/run.py --image-bench    # Phase 2-M: container image CVE scan (alpine:3.10 vulnerable + alpine:3.21 clean)
 .venv/bin/python bench/run.py --sbom-bench     # Phase 2-N: SBOM-based CVE scan via Syft+Grype (committed CycloneDX SBOM fixtures)
+.venv/bin/python bench/run.py --apifuzz-bench  # Phase 2-O: OpenAPI fuzzing parser test (committed Schemathesis NDJSON)
 ```
 
 Outputs are committed under `bench/report.md` (human) and

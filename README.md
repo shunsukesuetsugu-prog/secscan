@@ -23,7 +23,8 @@ secscan all --path .
 | `config`   | Trivy (Docker)       | IaC: k8s manifests, Terraform, Dockerfile, Helm (Phase 2-L) |
 | `image`    | Trivy (Docker, image mode) | container image CVEs — OS pkg + language pkg vulns (Phase 2-M) |
 | `sbom`     | Syft + Grype (Docker)    | SBOM-based CVE matching: scan a directory / OCI image / existing SBOM file (Phase 2-N) |
-| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom when their targets are configured) |
+| `apifuzz`  | Schemathesis (Docker)    | OpenAPI fuzzing — sends auto-generated edge-case requests to a live API to find input-validation / spec-conformance / auth bugs (Phase 2-O) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom/apifuzz when their targets are configured) |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -505,6 +506,93 @@ other is a meaningful signal worth investigating. secscan keeps
 both findings (scanner name is part of the fingerprint), so a
 `baseline accept` on one does NOT silence the other.
 
+## OpenAPI fuzzing (Schemathesis, Phase 2-O)
+
+`secscan apifuzz` runs [Anchore Schemathesis](https://schemathesis.readthedocs.io/)
+against a live API. Schemathesis reads your OpenAPI spec and auto-
+generates property-based test cases that exercise:
+
+- **Server crashes** (5xx responses → `not_a_server_error`, HIGH)
+- **Spec drift** (response shape doesn't match the schema →
+  `response_schema_conformance` / `status_code_conformance`, MEDIUM)
+- **Auth bypasses** (endpoints accept anonymous requests despite the
+  spec marking them as protected → `ignored_auth`, HIGH)
+- **Resource lifecycle bugs** (use-after-free on deleted ids →
+  `use_after_free`, HIGH)
+- **Input validation gaps** (malformed/extreme inputs the spec marks
+  invalid get accepted → `negative_data_rejection`, MEDIUM)
+
+This is the **business-logic / input-validation** complement to DAST
+(Phase 2-D, HTTP-layer ZAP probes) — the two are deliberately
+separate scanners because the bug classes barely overlap.
+
+```sh
+# Schema from a live URL (Schemathesis fetches it)
+secscan apifuzz \
+  --api-url https://staging.example.com/api/v3 \
+  --schema https://staging.example.com/api/v3/openapi.json
+
+# Schema from a local file (bind-mounted RO)
+secscan apifuzz \
+  --api-url https://staging.example.com/api/v3 \
+  --schema ./openapi.yaml \
+  --auth-header "Authorization: Bearer $JWT"
+
+# Active mode (DESTRUCTIVE — see "active mode" below)
+secscan apifuzz \
+  --api-url https://staging.example.com/api/v3 \
+  --schema ./openapi.yaml \
+  --mode active --allow-active \
+  --max-examples 50 --seed 42
+```
+
+Required flags / config:
+
+| Flag                  | Equivalent config key       | Purpose                                          |
+| --------------------- | --------------------------- | ------------------------------------------------ |
+| `--api-url <URL>`     | `[apifuzz].api_url`         | live API base URL. No query/fragment/userinfo.   |
+| `--schema <P>`        | `[apifuzz].schema`          | OpenAPI source: `http(s)://` URL or local file.  |
+| `--mode {baseline,active}` | `[apifuzz].mode`       | `baseline` = GET/HEAD/OPTIONS; `active` = all methods. |
+| `--allow-active`      | _(CLI-only — never config)_ | Second opt-in for `--mode=active`.               |
+| `--auth-header "Name: Value"` | `[apifuzz].headers` | repeatable. Same validator as Phase 2-K DAST.    |
+| `--max-examples N`    | `[apifuzz].max_examples`    | Hypothesis test cases per operation (default 25). |
+| `--seed N`            | `[apifuzz].seed`            | Fixed seed for reproducible runs.                |
+
+### Active mode requires a second opt-in
+
+`--mode=active` enables fuzzing of mutating methods (POST / PUT /
+PATCH / DELETE). Schemathesis will create users, orders, and other
+side-effect-bearing records, and may DELETE existing ones if the
+spec lists those endpoints.
+
+To prevent an attacker-controlled `.secscan.toml` from silently
+turning on destructive fuzzing, **`allow_active` cannot be set
+from config**. The operator must additionally pass `--allow-active`
+on the CLI. `mode = "active"` in config + no `--allow-active` on
+the CLI → exit 2 with a clear error before any docker call.
+
+**Do NOT point active mode at production.**
+
+### Security pins baked in
+
+- Schema FILE targets are confined to the scan root (config-origin
+  always, CLI-origin unless `--unsafe-allow-schema-outside-scan-root`
+  is set). Mirrors Phase 2-N's per-origin discipline.
+- `--max-redirects 0` is mandatory — Schemathesis cannot follow
+  3xx redirects out of the operator-declared `--api-url` scope.
+- The parser checks each request URI in the NDJSON report against
+  `--api-url` scheme+host. URIs outside the scope surface as
+  warnings (visible even when the scenario "passed" the API's
+  checks) so the operator notices if a schema's `servers:` list
+  caused Schemathesis to touch a different host.
+- `--generation-database :memory:` keeps Hypothesis examples in
+  memory only; bench runs are reproducible given a fixed seed.
+- `--output-sanitize true` masks token-shaped values in
+  Schemathesis's own console output.
+- 2-step pipeline uses a named volume `secscan-apifuzz-<32 hex>`
+  with try/finally cleanup. Sweep orphaned volumes (SIGKILL
+  recovery) with `docker volume prune -f --filter label=secscan-tmp=1`.
+
 ## Detection-rate benchmark
 
 `bench/run.py` measures how much of a curated known-vulnerable
@@ -646,6 +734,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-K   | ZAP auth-flow via HTTP header injection (`--auth-header`)  | done (v0.13.0) |
 | 2-M   | container image CVE scan (`secscan image`, Trivy image mode)   | done (v0.14.0) |
 | 2-N   | SBOM-based CVE scan (`secscan sbom`, Syft + Grype 2-step pipeline) | done (v0.15.0) |
+| 2-O   | OpenAPI fuzzing (`secscan apifuzz`, Schemathesis) | done (v0.16.0) |
 
 ## Development
 

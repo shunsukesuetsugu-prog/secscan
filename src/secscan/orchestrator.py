@@ -230,6 +230,42 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
             timeout_seconds=cfg.timeout_seconds,
             extra=MappingProxyType({"image": image}),
         )
+    if scanner_name == "apifuzz":
+        # Phase 2-O: Schemathesis pipeline via docker. Local
+        # import — optional in envs without docker.
+        from .scanners.apifuzz._pinned import (
+            DEFAULT_HELPER_IMAGE,
+            DEFAULT_SCHEMATHESIS_IMAGE,
+        )
+
+        af = config.apifuzz
+        scanner_image = af.scanner_image.strip() or DEFAULT_SCHEMATHESIS_IMAGE
+        helper_image = af.helper_image.strip() or DEFAULT_HELPER_IMAGE
+        return ScanConfig(
+            timeout_seconds=af.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    "api_url": af.api_url,
+                    "schema": af.schema,
+                    # Codex Phase 2-O design review MUST-FIX
+                    # (security): these fields are CLI-only and
+                    # cannot be set from config. The CLI override
+                    # layer (``_apply_cli_overrides``) is the
+                    # only writer.
+                    "schema_from_cli": af.schema_from_cli,
+                    "unconfine_cli_schema": af.unconfine_cli_schema,
+                    "mode": af.mode,
+                    "allow_active": af.allow_active,
+                    "headers": af.headers,
+                    "scanner_image": scanner_image,
+                    "helper_image": helper_image,
+                    "max_examples": af.max_examples,
+                    "seed": af.seed,
+                    "deterministic": af.deterministic,
+                    "request_timeout": af.request_timeout,
+                }
+            ),
+        )
     if scanner_name == "sbom":
         # Phase 2-N: Syft + Grype 2-step pipeline via docker.
         # Local import to keep the optional scanner out of every
