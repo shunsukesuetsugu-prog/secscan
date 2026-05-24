@@ -40,6 +40,7 @@ DEFAULT_SBOM_TIMEOUT = 900
 DEFAULT_SBOM_PLATFORM = "linux/amd64"
 DEFAULT_APIFUZZ_TIMEOUT = 1200
 DEFAULT_APIFUZZ_MAX_EXAMPLES = 25
+DEFAULT_IAST_TIMEOUT = 300
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -105,6 +106,7 @@ class UnknownSeverityPolicy:
     image: str = "warn"
     sbom: str = "warn"
     apifuzz: str = "warn"
+    iast: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -310,6 +312,35 @@ class ApifuzzConfig:
 
 
 @dataclass(frozen=True)
+class IastConfig:
+    """Phase 2-P: IAST harness configuration.
+
+    **Every field on this dataclass is CLI-only.** The
+    ``_parse_iast`` parser rejects ALL keys from
+    ``.secscan.toml`` — this is the Codex Phase 2-P design
+    review MUST-FIX #1 mitigation against config-origin RCE.
+    An attacker who manages to write to ``.secscan.toml`` on a
+    CI runner must NOT be able to inject an ``[iast].command``
+    that secscan would happily exec under operator credentials.
+
+    The fields exist on this dataclass so the CLI override
+    layer (``cli._apply_cli_overrides``) has a typed place to
+    deposit values, and the orchestrator's ``_scan_config_for``
+    has a single source to forward to the scanner. The values
+    NEVER come from disk.
+    """
+
+    command: str = ""
+    probe_url: str = ""
+    pyrasp_log: str = ""
+    allow_risky_probes: bool = False
+    app_ready_timeout: float = 60.0
+    shutdown_grace_seconds: float = 5.0
+    probe_timeout: float = 10.0
+    timeout_seconds: int = DEFAULT_IAST_TIMEOUT
+
+
+@dataclass(frozen=True)
 class DastConfig:
     """Phase 2-D DAST scanner configuration.
 
@@ -375,6 +406,7 @@ class ProjectConfig:
     image: ImageConfig = field(default_factory=ImageConfig)
     sbom: SbomConfig = field(default_factory=SbomConfig)
     apifuzz: ApifuzzConfig = field(default_factory=ApifuzzConfig)
+    iast: IastConfig = field(default_factory=IastConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -454,6 +486,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         image=cfg.image,
         sbom=cfg.sbom,
         apifuzz=cfg.apifuzz,
+        iast=cfg.iast,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -472,6 +505,7 @@ _VALID_SCANNERS = frozenset(
         "image",
         "sbom",
         "apifuzz",
+        "iast",
     }
 )
 
@@ -559,6 +593,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
             "image",
             "sbom",
             "apifuzz",
+            "iast",
             "baseline",
             "severity_overrides",
         },
@@ -578,6 +613,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     apifuzz_scanner = _parse_apifuzz(
         _require_table(raw.get("apifuzz"), "apifuzz")
     )
+    iast_scanner = _parse_iast(_require_table(raw.get("iast"), "iast"))
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -618,6 +654,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         image=image_scanner,
         sbom=sbom_scanner,
         apifuzz=apifuzz_scanner,
+        iast=iast_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -636,6 +673,7 @@ def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
             "image",
             "sbom",
             "apifuzz",
+            "iast",
         },
         "scan.severity_unknown_policy",
     )
@@ -812,6 +850,34 @@ def _parse_sbom(table: dict[str, object]) -> SbomConfig:
             minimum=1,
         ),
     )
+
+
+def _parse_iast(table: dict[str, object]) -> IastConfig:
+    """Phase 2-P: parse the ``[iast]`` section.
+
+    Codex Phase 2-P design review MUST-FIX #1 (security): the
+    ``[iast]`` table is **forbidden**. ``[iast].command`` would
+    let an attacker who can write to ``.secscan.toml`` execute
+    arbitrary commands under operator credentials in CI. The
+    only legal contents of ``[iast]`` is the empty table — and
+    even that case is reached only when ``.secscan.toml`` lists
+    ``[iast]`` for documentation purposes.
+
+    All IAST configuration must come from the CLI. The CLI's
+    ``_apply_cli_overrides`` writes to ``ProjectConfig.iast``
+    directly; this parser never does.
+    """
+    if table:
+        keys = sorted(table.keys())
+        raise ConfigError(
+            "[iast] is CLI-only — refusing keys "
+            f"{keys}. The IAST harness spawns ``--command`` as a "
+            "subprocess under operator credentials; allowing it "
+            "from config would let an attacker who can write to "
+            ".secscan.toml execute arbitrary code in CI. Pass "
+            "--command / --probe-url / --pyrasp-log on the CLI."
+        )
+    return IastConfig()
 
 
 def _parse_apifuzz(table: dict[str, object]) -> ApifuzzConfig:

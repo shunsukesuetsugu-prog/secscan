@@ -989,6 +989,72 @@ def _bench_apifuzz(fixture_dir: Path) -> FixtureResult:
     )
 
 
+def _bench_iast(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-P: parser-regression bench for IAST.
+
+    Like Phase 2-O's apifuzz bench, this does NOT spawn a live
+    pyrasp-instrumented app — it loads a committed pyrasp NDJSON
+    fixture, rewrites the run_id placeholder to a fresh random
+    id, and feeds the result through the parser. The expected
+    rule-id set must surface.
+
+    The fixture also includes one event tagged with a
+    *different* run_id (``00000000…``) — the parser MUST filter
+    that out. This is the run-id security gate from Codex Phase
+    2-P design review MUST-FIX #5.
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    log_filename = expected.get("event_log_file", "pyrasp_events.ndjson")
+    fixture_log = fixture_dir / log_filename
+    if not fixture_log.is_file():
+        return FixtureResult(
+            scanner="iast",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=f"missing IAST fixture file {log_filename}",
+        )
+
+    placeholder = expected.get(
+        "run_id_placeholder", "BENCH_RUN_ID_PLACEHOLDER"
+    )
+    # Generate a fresh run id and substitute into a tempfile so
+    # the committed fixture stays unchanged.
+    run_id = _secrets.token_hex(16)
+    log_bytes = fixture_log.read_bytes()
+    rewritten = log_bytes.replace(
+        placeholder.encode("utf-8"), run_id.encode("utf-8")
+    )
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="secscan-iast-bench-"))
+    try:
+        tmp_log = tmp_dir / "rewritten.ndjson"
+        tmp_log.write_bytes(rewritten)
+        from secscan.scanners.iast import parse_pyrasp_log
+
+        parsed = parse_pyrasp_log(tmp_log, run_id=run_id)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    expected_rule_ids = [
+        e["rule_id"]
+        for e in expected.get("expected_findings_when_run_id_matches", [])
+        if isinstance(e, dict) and e.get("rule_id")
+    ]
+    rule_ids = {f.rule_id for f in parsed.findings}
+    detected = sum(1 for rid in expected_rule_ids if rid in rule_ids)
+    return FixtureResult(
+        scanner="iast",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_rule_ids),
+        detected_count=detected,
+        false_positive_count=0,
+        raw_finding_count=len(parsed.findings),
+        comparison_tool="pyrasp (committed NDJSON)",
+    )
+
+
 def _bench_external(fixture_dir: Path) -> FixtureResult:
     """Phase 2-I dispatcher: SAST → ``_bench_external_sast``,
     secrets → ``_bench_external_secrets``."""
@@ -1756,6 +1822,7 @@ def run_all(
     include_image: bool = False,
     include_sbom: bool = False,
     include_apifuzz: bool = False,
+    include_iast: bool = False,
     include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
@@ -1817,6 +1884,13 @@ def run_all(
                 if not sub.is_dir() or not (sub / "expected.json").exists():
                     continue
                 results.append(_bench_apifuzz(sub))
+    if include_iast:
+        iast_root = SAFE_FIXTURE_ROOT / "iast"
+        if iast_root.is_dir():
+            for sub in sorted(iast_root.iterdir()):
+                if not sub.is_dir() or not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_iast(sub))
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -1984,6 +2058,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--iast-bench",
+        action="store_true",
+        dest="iast_bench",
+        help=(
+            "Phase 2-P: include IAST parser bench (loads committed "
+            "pyrasp NDJSON, rewrites run_id, runs parser, asserts "
+            "expected rule IDs surface AND the stale-run event is "
+            "filtered out). Live pyrasp + Flask bench is NOT part "
+            "of the default — pip install would be required."
+        ),
+    )
+    parser.add_argument(
         "--apifuzz-bench",
         action="store_true",
         dest="apifuzz_bench",
@@ -2049,6 +2135,7 @@ def main(argv: list[str] | None = None) -> int:
             include_image=args.image_bench,
             include_sbom=args.sbom_bench,
             include_apifuzz=args.apifuzz_bench,
+            include_iast=args.iast_bench,
             include_external=args.external,
         )
     except BenchError as exc:

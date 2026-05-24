@@ -24,7 +24,8 @@ secscan all --path .
 | `image`    | Trivy (Docker, image mode) | container image CVEs — OS pkg + language pkg vulns (Phase 2-M) |
 | `sbom`     | Syft + Grype (Docker)    | SBOM-based CVE matching: scan a directory / OCI image / existing SBOM file (Phase 2-N) |
 | `apifuzz`  | Schemathesis (Docker)    | OpenAPI fuzzing — sends auto-generated edge-case requests to a live API to find input-validation / spec-conformance / auth bugs (Phase 2-O) |
-| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom/apifuzz when their targets are configured) |
+| `iast`     | pyrasp (operator-supplied) | runtime IAST harness — spawns the operator's app subprocess, sends canary probes, parses pyrasp event log. **CLI-only**, NEVER in `secscan all` (Phase 2-P) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom/apifuzz when their targets are configured). **IAST is excluded** — see Phase 2-P notes. |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -593,6 +594,120 @@ the CLI → exit 2 with a clear error before any docker call.
   with try/finally cleanup. Sweep orphaned volumes (SIGKILL
   recovery) with `docker volume prune -f --filter label=secscan-tmp=1`.
 
+## IAST harness (pyrasp, Phase 2-P)
+
+`secscan iast` is a **runtime IAST test harness**. Unlike every
+other secscan scanner, it does NOT wrap a docker container — it
+spawns *your* application as a subprocess (under your shell
+credentials), sends a curated set of canary HTTP probes, and
+parses the pyrasp event log your app produces.
+
+```sh
+# Smoke a Flask app instrumented with pyrasp.
+secscan iast \
+  --command "python -m flask --app app run --host=127.0.0.1 --port=5050" \
+  --probe-url http://127.0.0.1:5050 \
+  --pyrasp-log /path/to/scan-root/.secscan-pyrasp.json
+```
+
+### Operator setup (one-time)
+
+secscan does NOT install or configure pyrasp. The harness expects
+your app to be already instrumented:
+
+```python
+# requirements.txt — pin the version pin in src/secscan/scanners/iast/_pinned.py
+# for cross-engine compatibility with the bench parser fixture.
+pyrasp==0.8.0
+```
+
+```python
+# app.py — instrument before any route handler runs.
+import os
+import pyrasp
+from flask import Flask
+
+app = Flask(__name__)
+pyrasp.init(
+    app,
+    conf={
+        # secscan's harness sets these env vars at spawn time.
+        "log_file": os.environ.get("SECSCAN_PYRASP_LOG", "/tmp/pyrasp.json"),
+        # Record the run-id header so secscan can filter for the
+        # current run's events.
+        "log_headers": ["X-Secscan-Run-Id", "X-Secscan-Probe-Id"],
+        # Don't actually block requests — we just want event
+        # detection. Production deployments may want enforce=True
+        # but that's outside secscan's concern.
+        "enforce": False,
+    },
+)
+```
+
+The harness sets two environment variables when spawning the app:
+
+- `SECSCAN_PYRASP_LOG` — the path passed via `--pyrasp-log`. Your
+  app should write pyrasp events here. The path MUST be inside the
+  scan root and MUST NOT pre-exist (stale events would poison the
+  parse).
+- `SECSCAN_RUN_ID` — a 32-hex-char identifier the harness also
+  injects as `X-Secscan-Run-Id` on every probe request. The parser
+  keeps ONLY events tagged with this run-id (Codex Phase 2-P design
+  review MUST-FIX #5 — defends against stale event log pollution).
+
+### CLI flags
+
+| Flag                    | Purpose                                          |
+| ----------------------- | ------------------------------------------------ |
+| `--command <argv>`      | Shell-style command to spawn (shlex.split + Popen shell=False). CLI-only. |
+| `--probe-url <URL>`     | Loopback-only base URL to probe. Hostnames resolve to a literal IP at validation time (DNS-rebind defence). CLI-only. |
+| `--pyrasp-log <PATH>`   | Path the app writes events to. Confined to scan root; must not pre-exist. CLI-only. |
+| `--allow-risky-probes`  | Opt in to AWS IMDS / time-based blind SQLi / sleep-based RCE payloads. Default off. CLI-only. |
+| `--app-ready-timeout N` | How long to wait for the app to accept TCP on the probe URL (default 60s). |
+
+### Security architecture (why IAST is uniquely CLI-only)
+
+The IAST harness is the only secscan scanner that:
+
+1. **Spawns operator code under operator credentials.** Every other
+   scanner runs in a hardened docker container with
+   `--cap-drop=ALL` and a read-only mount. IAST runs your app.
+2. **Has NO config-file entry point.** Writing `[iast]` in your
+   `.secscan.toml` is a hard error (exit 2, "CLI-only"). A
+   tampered config file cannot inject `[iast].command = "rm -rf /"`
+   — the config parser refuses to populate `ProjectConfig.iast`
+   from disk.
+3. **Is excluded from `secscan all`.** Even a fully-populated
+   `[iast]` block in config + correct CLI args would not pull IAST
+   into `secscan all`. The only legal entry point is `secscan iast`
+   directly. This makes IAST runs an **interactive operator
+   decision**, never an automated CI step that could be triggered
+   by a PR.
+4. **Pins the probe URL at validation time.** Hostnames like
+   `localhost` are resolved once to a literal IPv4/IPv6 loopback
+   address; subsequent probes connect to the IP, not the hostname.
+   This closes the DNS-rebind TOCTOU window (Codex Phase 2-P diff
+   review MUST-FIX).
+5. **SIGKILLs the process group, not just the leader.** Flask's
+   reloader and gunicorn workers are descendants of the spawned
+   process. The harness uses `start_new_session=True` + `killpg`
+   so SIGTERM → grace → SIGKILL hits the whole tree. The SIGKILL
+   step runs unconditionally even if the leader has already exited
+   (Codex Phase 2-P diff review MUST-FIX).
+
+### Probe payloads
+
+10 default "safe" canary payloads (SQLi, XSS, RCE, SSRF, traversal,
+NoSQLi). All are non-destructive — no `DROP TABLE`, no
+`cat /etc/passwd`, no IMDS endpoints. Three additional "risky"
+payloads (IMDS, blind sleep) are gated behind `--allow-risky-probes`.
+
+These are **canary probes for event triggers**, not fuzzing.
+secscan's value here is the harness (subprocess lifecycle + probe
+HTTP + pyrasp event correlation), not the breadth of attack
+patterns — if you need real-world adversarial fuzzing, use
+`secscan apifuzz` (Phase 2-O) for HTTP-layer fuzzing.
+
 ## Detection-rate benchmark
 
 `bench/run.py` measures how much of a curated known-vulnerable
@@ -735,6 +850,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-M   | container image CVE scan (`secscan image`, Trivy image mode)   | done (v0.14.0) |
 | 2-N   | SBOM-based CVE scan (`secscan sbom`, Syft + Grype 2-step pipeline) | done (v0.15.0) |
 | 2-O   | OpenAPI fuzzing (`secscan apifuzz`, Schemathesis) | done (v0.16.0) |
+| 2-P   | IAST harness (`secscan iast`, pyrasp-aware) | done (v0.17.0) |
 
 ## Development
 

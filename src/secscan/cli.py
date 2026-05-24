@@ -48,6 +48,7 @@ from .scanners.base import Scanner
 from .scanners.config_scanner import ConfigScanner
 from .scanners.dast import DastScanner
 from .scanners.deps_scanner import DepsScanner
+from .scanners.iast import IastScanner
 from .scanners.image import ImageScanner
 from .scanners.sast import SastScanner
 from .scanners.sbom import SbomScanner
@@ -63,6 +64,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     ImageScanner,
     SbomScanner,
     ApifuzzScanner,
+    IastScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -110,6 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "image",
         "sbom",
         "apifuzz",
+        "iast",
         "all",
     ):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
@@ -122,7 +125,8 @@ def _build_parser() -> argparse.ArgumentParser:
                 metavar="SCANNER",
                 help=(
                     "scanner to skip (repeatable). Choices: secrets, deps, "
-                    "sast, dast, config, image, sbom, apifuzz."
+                    "sast, dast, config, image, sbom, apifuzz. (iast is "
+                    "never included in 'secscan all' — see README.)"
                 ),
             )
         if cmd == "config":
@@ -133,6 +137,64 @@ def _build_parser() -> argparse.ArgumentParser:
                 help=(
                     "OCI image reference (digest-pinned) for the Trivy "
                     "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+        if cmd == "iast":
+            sub.add_argument(
+                "--command",
+                required=False,
+                default=None,
+                metavar="ARGV",
+                dest="iast_command",
+                help=(
+                    "Shell-style command string for the app to spawn "
+                    "(parsed with shlex.split, then Popen shell=False). "
+                    "CLI-only — cannot be set from .secscan.toml."
+                ),
+            )
+            sub.add_argument(
+                "--probe-url",
+                required=False,
+                default=None,
+                metavar="URL",
+                dest="iast_probe_url",
+                help=(
+                    "Base URL the harness sends probes to. MUST resolve "
+                    "exclusively to loopback (127.0.0.1, ::1, localhost). "
+                    "CLI-only."
+                ),
+            )
+            sub.add_argument(
+                "--pyrasp-log",
+                required=False,
+                default=None,
+                metavar="PATH",
+                dest="iast_pyrasp_log",
+                help=(
+                    "Path the operator's app will write pyrasp events to. "
+                    "Must not pre-exist (stale events would poison the "
+                    "parse). Must be inside the scan root. CLI-only."
+                ),
+            )
+            sub.add_argument(
+                "--allow-risky-probes",
+                action="store_true",
+                dest="iast_allow_risky",
+                help=(
+                    "Opt in to risky probe payloads (AWS IMDS, time-"
+                    "based blind SQLi, sleep-based RCE). CLI-only."
+                ),
+            )
+            sub.add_argument(
+                "--app-ready-timeout",
+                type=float,
+                default=None,
+                metavar="SECONDS",
+                dest="iast_app_ready_timeout",
+                help=(
+                    "How long to wait for the spawned app to start "
+                    "accepting TCP connections before giving up "
+                    "(default 60)."
                 ),
             )
         if cmd == "apifuzz":
@@ -563,6 +625,32 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
                 "secscan image requires at least one target image. Pass "
                 "--image '<repo>[:tag]@sha256:<digest>' (repeatable) or "
                 "set [image].refs in .secscan.toml."
+            )
+            return int(ExitCode.SCAN_ERROR)
+
+    # Phase 2-P: ``secscan iast`` requires command + probe-url +
+    # pyrasp-log all three. Missing any → usage error. The IAST
+    # harness is the only scanner that NEVER runs from ``secscan
+    # all`` — operators must invoke it explicitly (Codex MUST-FIX
+    # #1 carry-over: spawning the operator's app under operator
+    # credentials needs a deliberate, interactive operator action).
+    if args.command == "iast":
+        if not config.iast.command.strip():
+            _print_error(
+                "secscan iast requires --command (the shell-style "
+                "argv for the app to spawn)."
+            )
+            return int(ExitCode.SCAN_ERROR)
+        if not config.iast.probe_url.strip():
+            _print_error(
+                "secscan iast requires --probe-url (the loopback "
+                "base URL the harness sends probes to)."
+            )
+            return int(ExitCode.SCAN_ERROR)
+        if not config.iast.pyrasp_log.strip():
+            _print_error(
+                "secscan iast requires --pyrasp-log (the path the "
+                "app will write pyrasp events to; must not pre-exist)."
             )
             return int(ExitCode.SCAN_ERROR)
 
@@ -1033,6 +1121,26 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
             new, apifuzz=replace(new.apifuzz, unconfine_cli_schema=True)
         )
 
+    # Phase 2-P IAST CLI overrides. ALL iast fields are CLI-only
+    # (the config parser rejects ``[iast]`` keys outright) so this
+    # is the SOLE writer of ``ProjectConfig.iast``.
+    iast_command = getattr(args, "iast_command", None)
+    if isinstance(iast_command, str) and iast_command:
+        new = replace(new, iast=replace(new.iast, command=iast_command))
+    iast_probe_url = getattr(args, "iast_probe_url", None)
+    if isinstance(iast_probe_url, str) and iast_probe_url:
+        new = replace(new, iast=replace(new.iast, probe_url=iast_probe_url))
+    iast_pyrasp_log = getattr(args, "iast_pyrasp_log", None)
+    if isinstance(iast_pyrasp_log, str) and iast_pyrasp_log:
+        new = replace(new, iast=replace(new.iast, pyrasp_log=iast_pyrasp_log))
+    if getattr(args, "iast_allow_risky", False):
+        new = replace(new, iast=replace(new.iast, allow_risky_probes=True))
+    iast_ready = getattr(args, "iast_app_ready_timeout", None)
+    if isinstance(iast_ready, (int, float)) and iast_ready > 0:
+        new = replace(
+            new, iast=replace(new.iast, app_ready_timeout=float(iast_ready))
+        )
+
     auth_headers = getattr(args, "auth_headers", None)
     if auth_headers:
         new = replace(
@@ -1103,6 +1211,13 @@ def _build_scanner_instances(
             and not apifuzz_configured
             and command != "apifuzz"
         ):
+            continue
+        # Phase 2-P: IAST is NEVER included in ``secscan all`` —
+        # it spawns the operator's app subprocess and must be an
+        # explicit, interactive operator decision. Direct
+        # ``secscan iast`` invocation is the only path that
+        # instantiates this scanner.
+        if cls.name == "iast" and command != "iast":
             continue
         instances.append(cls())
     return instances

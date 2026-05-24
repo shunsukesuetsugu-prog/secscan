@@ -1,0 +1,33 @@
+{
+  "tool_under_test": "secscan iast (parser)",
+  "comparison_tool": "pyrasp event log (manually crafted snapshot)",
+  "advisory_db_snapshot": "2026-05-24",
+  "event_log_file": "pyrasp_events.ndjson",
+  "run_id_placeholder": "BENCH_RUN_ID_PLACEHOLDER",
+  "expected_findings_when_run_id_matches": [
+    {"rule_id": "rasp_sqli", "category": "sqli", "min_severity": "HIGH"},
+    {"rule_id": "rasp_xss", "category": "xss", "min_severity": "MEDIUM"},
+    {"rule_id": "rasp_command_injection", "category": "rce", "min_severity": "HIGH"},
+    {"rule_id": "rasp_ssrf", "category": "ssrf", "min_severity": "HIGH"},
+    {"rule_id": "rasp_path_traversal", "category": "traversal", "min_severity": "MEDIUM"}
+  ],
+  "notes": [
+    "Phase 2-P parser bench. The NDJSON file was hand-crafted to",
+    "match pyrasp 0.8.0's event schema (rule + category +",
+    "request.{method,path,headers} + matched_pattern + optional",
+    "cwe). The placeholder ``BENCH_RUN_ID_PLACEHOLDER`` is",
+    "rewritten by the bench runner at parse time to match a",
+    "randomly-generated run_id; the parser then yields findings",
+    "ONLY for the rewritten events.",
+    "",
+    "The 7th event uses run_id 00000000... and represents a stale",
+    "event from a previous (different) run. The parser MUST filter",
+    "it out — this is the load-bearing security gate from Codex",
+    "Phase 2-P design review MUST-FIX #5.",
+    "",
+    "Live bench against a real Flask + pyrasp app is NOT included",
+    "in the default bench (would require live pip install — Codex",
+    "Phase 2-N MUST-FIX #2 carry-over). The committed NDJSON gives",
+    "us deterministic parser test coverage without a network dep."
+  ]
+}

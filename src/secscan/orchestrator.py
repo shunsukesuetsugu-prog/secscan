@@ -230,6 +230,25 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
             timeout_seconds=cfg.timeout_seconds,
             extra=MappingProxyType({"image": image}),
         )
+    if scanner_name == "iast":
+        # Phase 2-P: IAST harness. Local import to keep the
+        # optional subprocess module out of every orchestrator
+        # invocation.
+        iast = config.iast
+        return ScanConfig(
+            timeout_seconds=iast.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    "command": iast.command,
+                    "probe_url": iast.probe_url,
+                    "pyrasp_log": iast.pyrasp_log,
+                    "allow_risky_probes": iast.allow_risky_probes,
+                    "app_ready_timeout": iast.app_ready_timeout,
+                    "shutdown_grace_seconds": iast.shutdown_grace_seconds,
+                    "probe_timeout": iast.probe_timeout,
+                }
+            ),
+        )
     if scanner_name == "apifuzz":
         # Phase 2-O: Schemathesis pipeline via docker. Local
         # import — optional in envs without docker.
