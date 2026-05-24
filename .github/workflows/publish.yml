@@ -11,7 +11,7 @@ name: Publish to PyPI
 #      ``secscan`` project.
 #   2. Account settings → "Publishing" → "Add a new pending
 #      publisher" with:
-#        - PyPI Project Name: secscan
+#        - PyPI Project Name: pysecscan
 #        - Owner:             shunsukesuetsugu-prog
 #        - Repository name:   secscan
 #        - Workflow name:     publish.yml
@@ -35,7 +35,7 @@ jobs:
     # checkbox lets the maintainer cancel a misfired release.
     environment:
       name: pypi
-      url: https://pypi.org/project/secscan/
+      url: https://pypi.org/project/pysecscan/
     permissions:
       # Required for Trusted Publisher: GitHub mints a short-
       # lived OIDC token that PyPI exchanges for an upload

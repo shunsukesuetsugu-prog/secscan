@@ -3,7 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "secscan"
+# PyPI *distribution* name = ``pysecscan``. The CLI command and
+# Python import name stay as ``secscan`` (see [project.scripts]
+# and src/secscan/). PyPI's typo-squat / name-policy gate blocked
+# the bare ``secscan`` name on pypi.org (an unrelated
+# ``secscan-cli`` package exists from a different author),
+# so we ship under a ``py-`` prefix the way pyright, pyflakes,
+# pytest, etc. do.
+name = "pysecscan"
 version = "0.19.0"
 description = "Cross-project vulnerability scanning CLI: dependency CVE, SAST, secrets, DAST, IAST, container, SBOM, API fuzz, and supply chain integrity — one entry point."
 readme = "README.md"

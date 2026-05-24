@@ -35,6 +35,19 @@ secscan all --path .
 
 Requires Python 3.11 or newer.
 
+### From PyPI
+
+```sh
+pip install pysecscan          # installs the ``secscan`` command
+pip install "pysecscan[sast,deps]"  # + bundled semgrep / pip-audit
+```
+
+The PyPI *distribution* name is `pysecscan` (the bare `secscan`
+was unavailable on PyPI; see the note in `pyproject.toml`). The
+CLI command and Python import name are still `secscan`.
+
+### From source
+
 ```sh
 # 1. Clone the repo
 git clone <repo>
@@ -947,7 +960,7 @@ project root.
 ## Windows support (Phase 2-W)
 
 secscan v0.18.0 runs natively on Linux, macOS, **and Windows**.
-The `pip install secscan` flow is identical across OSes; CI tests
+The `pip install pysecscan` flow is identical across OSes; CI tests
 all three via a GitHub Actions matrix.
 
 ### What works the same on every OS
