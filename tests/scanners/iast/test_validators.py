@@ -231,6 +231,40 @@ class TestValidatePyraspLogPath:
         with pytest.raises(IastInputError, match="must not be empty"):
             validate_pyrasp_log_path("", scan_root=tmp_path)
 
+    def test_windows_drive_letter_passes_charset_gate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A2 / Phase 2-W regression: under Windows, the charset
+        gate must accept ``C:\\path\\file.json`` (drive colon +
+        backslashes). Before the fix, the validator used a private
+        POSIX-only forbidden set that rejected every absolute
+        Windows path before it could be resolved.
+
+        We simulate Windows by monkey-patching ``IS_WINDOWS`` in
+        the shared portability module — the rest of the validator
+        (Path resolution, ``relative_to`` containment) is allowed
+        to fail with a DIFFERENT error; the assertion is just that
+        the charset gate no longer fires.
+        """
+        from secscan import portability
+
+        monkeypatch.setattr(portability, "IS_WINDOWS", True)
+        # Some absolute-looking Windows path. On POSIX it won't
+        # resolve to anything meaningful, but the charset gate is
+        # the only thing under test here.
+        candidate = "C:\\Users\\runner\\AppData\\Temp\\pyrasp.json"
+        # Either the call succeeds (path resolved + containment
+        # passed in some unusual POSIX env) or it raises an error
+        # about scan-root escape / non-existence. What it must
+        # NOT raise is "forbidden character".
+        try:
+            validate_pyrasp_log_path(candidate, scan_root=tmp_path)
+        except IastInputError as exc:
+            assert "forbidden character" not in str(exc), (
+                f"Windows drive-letter path should pass charset gate; "
+                f"got {exc!r}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # validate_run_id

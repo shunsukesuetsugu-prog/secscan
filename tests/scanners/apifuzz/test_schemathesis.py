@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from secscan.models import Severity
+from secscan.portability import to_docker_host_path
 from secscan.scanners.apifuzz._pinned import (
     DEFAULT_HELPER_IMAGE,
     DEFAULT_SCHEMATHESIS_IMAGE,
@@ -199,7 +200,10 @@ class TestBuildArgvSchemaFile:
             None,
         )
         assert ro_mount is not None
-        assert str(f) in ro_mount
+        # Use the docker-host form (POSIX: pass-through; Windows:
+        # ``C:\\Users\\foo`` → ``/c/Users/foo``) — the raw
+        # ``str(f)`` is not what the argv carries on Windows.
+        assert to_docker_host_path(f) in ro_mount
         # Schema location is the in-container path with the same suffix.
         sep = argv.index("--")
         assert argv[sep + 3].startswith("/schema/openapi.")

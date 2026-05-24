@@ -33,28 +33,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ...portability import path_charset_check as _path_charset_ok
+
 
 class IastInputError(ValueError):
     """Caller-supplied input we refuse for the IAST harness."""
 
 
 MAX_PYRASP_LOG_BYTES = 32 * 1024 * 1024
-
-
-_FORBIDDEN_PATH_CHARS = frozenset(
-    [":", "\\", "\x00", "\n", "\r", "\t", "\v", "\f"]
-)
-
-
-def _path_charset_ok(s: str) -> bool:
-    for ch in s:
-        if ch in _FORBIDDEN_PATH_CHARS:
-            return False
-        if ch.isspace():
-            return False
-        if not ch.isprintable():
-            return False
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -270,10 +256,13 @@ def validate_pyrasp_log_path(
     or merge with a stale log. ``allow_existing=True`` is for
     tests that pre-stage a fixture.
 
-    The path is also checked against the same charset rules as
-    Phase 2-N (no ``:``, no whitespace, no backslash, no control
-    chars) so a bind-mount-unsafe path cannot reach docker layer
-    handling we share with other scanners.
+    Charset rules are delegated to
+    :func:`secscan.portability.path_charset_check` so the same
+    cross-platform allowlist as the other docker-using scanners
+    applies. POSIX paths reject ``:`` / ``\\`` / whitespace /
+    control chars; Windows drive-letter paths (``C:\\Users\\...``)
+    are tolerated so the validator does not reject every
+    legitimate Windows operator input.
     """
     if not isinstance(raw, str):
         raise IastInputError("--pyrasp-log must be a string")
@@ -285,7 +274,8 @@ def validate_pyrasp_log_path(
     if not _path_charset_ok(candidate):
         raise IastInputError(
             "--pyrasp-log contains a forbidden character "
-            "(':', whitespace, control char, '\\\\', etc.)"
+            "(control char, NUL, embedded newline, or — on POSIX — "
+            "':' / '\\\\' / whitespace)"
         )
     # Reject symlinks BEFORE resolving — ``.resolve()`` follows
     # symlinks, so checking is_symlink() on the resolved Path
