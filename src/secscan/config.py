@@ -36,26 +36,30 @@ DEFAULT_DAST_TIMEOUT = 900
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
-    # Phase 2-F (post-benchmark): the original
-    # ``(p/python, p/javascript, p/typescript, p/owasp-top-ten)`` set
-    # measured 25% recall on Python CWE fixtures and 0% on JavaScript
-    # CWE fixtures. Adding ``p/default`` (the broad registry pack)
-    # lifted those to 50% / 100% with zero false positives on the
-    # curated ``safe_*`` borderline fixtures.
+    # Phase 2-F + 2-G: the registry packs cover most CWE categories
+    # but the bench measurement surfaced gaps the public packs do not
+    # fill at all — Python ``yaml.load`` without SafeLoader (CWE-502)
+    # and hard-coded credentials in named variables (CWE-798). We
+    # ship our own rules for those gaps under ``secscan:extra`` and
+    # lead with the sentinel so secscan's targeted rules see every
+    # file before the broader packs.
     #
-    # Order matters: ``p/default`` is listed FIRST so semgrep
-    # resolves its broader rule index up-front; the language-specific
-    # packs follow as catch-alls. ``p/owasp-top-ten`` is kept for
-    # the AppSec category coverage it provides on top of
-    # ``p/default``. Codex Phase 2-F diff review pinned the
-    # ordering: rules that fire on the same finding from multiple
-    # packs are deduplicated by the secscan Finding fingerprint
-    # (``rule_id + file + line``), so the overlap is harmless.
+    # Order:
+    # - ``secscan:extra`` — bundled rules (see src/secscan/rules/).
+    # - ``p/default`` — broad registry pack.
+    # - language-specific packs — catch-alls per ecosystem.
+    # - ``p/owasp-top-ten`` — AppSec category coverage on top.
+    #
+    # Overlap is fine: rules that fire on the same finding from
+    # multiple packs are deduplicated by the secscan Finding
+    # fingerprint (``rule_id + file + line``). Codex Phase 2-F /
+    # 2-G diff reviews pinned this.
     #
     # Operators who need different coverage (broader → add
     # ``p/security-audit``; narrower → drop ``p/default``) can
     # override the whole list via ``[sast].semgrep_config`` in
     # ``.secscan.toml`` or via ``--semgrep-config`` on the CLI.
+    "secscan:extra",
     "p/default",
     "p/python",
     "p/javascript",

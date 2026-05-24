@@ -328,38 +328,44 @@ snapshot; see `bench/report.md` for the full table):
 |---|---|---|---|---|---|---|
 | deps    | npm-vulnerable | 2 | 2 | **100%** | 0 | = npm audit ✅ |
 | deps    | pip-vulnerable | 3 | 3 | **100%** | 0 | = pip-audit (deduped) ✅ |
-| sast    | python | 4 | 2 | 50% | 0 | = semgrep ✅ |
+| sast    | python | 4 | 4 | **100%** | 0 | ≥ semgrep ✅ |
 | sast    | javascript | 2 | 2 | **100%** | 0 | = semgrep ✅ |
 | secrets | synthetic | 4 | 4 | **100%** | 0 | = gitleaks ✅ |
 | dast    | juice-shop | — | — | SKIPPED | — | run manually |
 
-**Overall recall: 13/15 = 86.7%**, false positives: **0**, ≥ best
+**Overall recall: 15/15 = 100%**, false positives: **0**, ≥ best
 single tool: **4/4**.
 
-Phase 2-F tuning (post-initial benchmark) lifted recall from
-54.5% to 86.7% by:
+Phase 2-F + 2-G tuning (post-initial benchmark) lifted recall
+from 54.5% → 86.7% → **100%** by:
 
-1. Adding `p/default` to the default semgrep ruleset family
-   (JavaScript SAST: 0% → 100%; Python SAST: 25% → 50%).
-2. Switching gitleaks from `--report-path=/dev/stdout` (which
-   gitleaks refuses to open on macOS) to a 0700 tempfile the
-   scanner manages — fixing a real cross-platform bug the
-   benchmark surfaced.
-3. De-duplicating the pip-audit comparison count by `(package,
-   advisory_id)` (pip-audit ships some advisories twice from
-   different source DBs; secscan dedups, so a fair comparison
-   must too).
+1. **`p/default` ruleset** added to the default semgrep family
+   (JavaScript SAST 0% → 100%; Python SAST 25% → 50%).
+2. **gitleaks tempfile fix** — switched from
+   `--report-path=/dev/stdout` (which gitleaks refuses on macOS)
+   to a 0700 tempfile the scanner manages with 0600 chmod +
+   try/finally cleanup. A real cross-platform bug the bench
+   surfaced.
+3. **pip-audit comparison dedup** by `(package, advisory_id)`
+   (pip-audit ships some advisories twice from different source
+   DBs; secscan dedups, so a fair comparison must too).
+4. **Bundled secscan rules** (`secscan:extra` sentinel) shipping
+   under `src/secscan/rules/` — Python `yaml.load` without
+   SafeLoader (CWE-502) and hard-coded credentials in named
+   variables (CWE-798), the two CWE categories the public
+   registry packs do not cover. The sentinel passes the
+   `_reject_unsafe_configs` safety gate (it points at our own
+   code, not user input) but is otherwise treated like any
+   path-based ruleset. Lifted Python SAST recall 50% → **100%**.
 
-What's still missed:
+What's still scope-limited rather than a recall miss:
 
-- **SAST Python**: `yaml.load` without SafeLoader and bare
-  hard-coded credentials. The default semgrep registry packs
-  don't carry rules for these. Users who need broader CWE
-  coverage can add `p/security-audit` to `[sast].semgrep_config`.
-  Going further means shipping a custom secscan rule pack — a
-  candidate for Phase 2-G.
 - **DAST**: deliberately a manual measurement (Docker + OWASP
   Juice Shop bring-up is too heavy for CI).
+- **Real-codebase FP rate**: the curated `safe_*` borderline
+  fixtures stay clean, but they don't represent the full
+  diversity of real source trees. Adding `p/security-audit` for
+  even broader CWE coverage is opt-in via `[sast].semgrep_config`.
 
 See `bench/README.md` for the full methodology, retraction policy,
 and how to add new fixtures.
@@ -409,12 +415,13 @@ specific Codex review iteration that motivated each invariant.
 | 2-D   | DAST (OWASP ZAP, Docker)                           | done (v0.5.0)           |
 | 2-E   | detection-rate benchmark (bench/)                  | done (v0.6.0)           |
 | 2-F   | tune defaults to improve bench recall (54.5% → 86.7%) | done (v0.7.0)        |
-| 2-G+  | custom secscan rule pack for SAST gaps; DAST profiles | future               |
+| 2-G   | bundled secscan semgrep rules (recall 86.7% → 100%) | done (v0.8.0)          |
+| 2-H+  | DAST profile catalogue, broader fixture corpus       | future                |
 
 ## Development
 
 ```sh
-.venv/bin/pytest               # 636 unit tests + 2 integration (skipped without the binaries)
+.venv/bin/pytest               # 648 unit tests + 2 integration (skipped without the binaries)
 .venv/bin/ruff check src/ tests/ bench/
 .venv/bin/mypy --strict src/secscan
 .venv/bin/python bench/run.py  # detection-rate benchmark (see bench/README.md)

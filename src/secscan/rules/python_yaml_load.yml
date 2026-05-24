@@ -1,0 +1,44 @@
+# secscan bundled rule: dangerous yaml.load
+#
+# Phase 2-G: the public semgrep registry packs we ship with by default
+# (``p/default``, ``p/python``, ``p/owasp-top-ten``) do NOT match
+# ``yaml.load(x)`` without an explicit safe Loader. Bench measurement
+# in Phase 2-E + 2-F surfaced this gap (CWE-502 fixture left
+# undetected). We ship this rule so secscan reaches 100% recall on
+# the curated Python SAST fixtures.
+#
+# False-positive surface: the rule fires when ``yaml.load`` is called
+# without a Loader kwarg OR with a known-unsafe Loader. The safe
+# loaders (``yaml.SafeLoader``, ``yaml.CSafeLoader``) are excluded
+# via ``pattern-not``, so ``yaml.safe_load(x)`` and
+# ``yaml.load(x, Loader=yaml.SafeLoader)`` do NOT trigger.
+
+rules:
+  - id: secscan-python-dangerous-yaml-load
+    message: |
+      yaml.load without an explicit SafeLoader is unsafe — it can
+      instantiate arbitrary Python objects from untrusted input
+      (CWE-502: Deserialization of Untrusted Data). Use
+      yaml.safe_load(...) or yaml.load(..., Loader=yaml.SafeLoader).
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+      category: security
+      references:
+        - https://github.com/yaml/pyyaml/wiki/PyYAML-yaml.load(input)-Deprecation
+        - https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data
+    pattern-either:
+      - pattern: yaml.load($X)
+      - pattern: yaml.load($X, $Y)
+      - pattern: yaml.load($X, Loader=yaml.Loader)
+      - pattern: yaml.load($X, Loader=yaml.FullLoader)
+      - pattern: yaml.load($X, Loader=yaml.UnsafeLoader)
+      - pattern: yaml.load($X, Loader=yaml.CLoader)
+      - pattern: yaml.load($X, Loader=yaml.CFullLoader)
+      - pattern: yaml.load($X, Loader=yaml.CUnsafeLoader)
+    pattern-not-either:
+      - pattern: yaml.load($X, Loader=yaml.SafeLoader)
+      - pattern: yaml.load($X, Loader=yaml.CSafeLoader)
+      - pattern: yaml.load($X, $Y, $Z)  # let other rules handle the 3-arg form

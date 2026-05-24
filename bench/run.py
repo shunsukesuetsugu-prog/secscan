@@ -571,10 +571,15 @@ def _run_semgrep_direct_count(fixture_dir: Path) -> int | None:
         # ``DEFAULT_SEMGREP_CONFIG`` rather than hardcoding the list
         # — otherwise tuning the default in src/secscan/config.py
         # silently breaks the comparison without anyone noticing.
+        # Phase 2-G: expand the ``secscan:extra`` sentinel to the
+        # bundled-rules absolute path (semgrep itself doesn't know
+        # the sentinel; it's a secscan-internal name).
         from secscan.config import DEFAULT_SEMGREP_CONFIG
+        from secscan.scanners.sast import _expand_bundled_sentinels
 
+        expanded = _expand_bundled_sentinels(DEFAULT_SEMGREP_CONFIG)
         argv = ["semgrep"]
-        for ruleset in DEFAULT_SEMGREP_CONFIG:
+        for ruleset in expanded:
             argv.extend(["--config", ruleset])
         argv.extend(
             [

@@ -56,13 +56,13 @@
       "skipped_reason": null
     },
     {
-      "comparison_count": 5,
+      "comparison_count": 7,
       "comparison_tool": "semgrep",
-      "detected_count": 2,
+      "detected_count": 4,
       "expected_count": 4,
       "false_positive_count": 0,
       "fixture_name": "python",
-      "raw_finding_count": 5,
+      "raw_finding_count": 7,
       "scanner": "sast",
       "skipped_reason": null
     }

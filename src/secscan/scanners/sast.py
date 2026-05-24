@@ -117,13 +117,20 @@ class SastScanner(Scanner):
             return _error(
                 "sast scanner refused unverified semgrep config(s): "
                 + ", ".join(rejected)
-                + ". Use registry shorthand (e.g. p/python) or a path inside "
-                "the scan root, or set [sast].allow_unverified_configs=true "
-                "to opt in.",
+                + ". Use registry shorthand (e.g. p/python), a path inside "
+                "the scan root, or the bundled 'secscan:extra' sentinel; "
+                "or set [sast].allow_unverified_configs=true to opt in.",
                 stderr=b"",
                 returncode=None,
                 duration=0.0,
             )
+
+        # Phase 2-G: expand the ``secscan:extra`` sentinel to the
+        # absolute path of secscan's bundled rules. The sentinel is
+        # whitelisted in ``_reject_unsafe_configs`` so it's safe to
+        # carry through the gate; we resolve it here only when
+        # actually about to invoke semgrep.
+        configs = tuple(_expand_bundled_sentinels(configs))
 
         argv = semgrep_argv(unit_root=unit.root, configs=configs)
         result = runner.run(
@@ -458,6 +465,57 @@ def _coerce_semgrep_configs(value: object) -> tuple[str, ...]:
     return ()
 
 
+BUNDLED_RULES_SENTINEL = "secscan:extra"
+"""CLI / config value that expands to secscan's bundled semgrep rules.
+
+Phase 2-G shipped ``src/secscan/rules/*.yml`` (a Python yaml.load
+rule + a Python hardcoded-credential rule) to fill SAST gaps the
+public semgrep registry packs do not cover. The sentinel keeps the
+config file portable (no machine-specific absolute path) and is
+whitelisted in ``_reject_unsafe_configs`` because the rules are
+shipped by secscan itself — not by an untrusted PR.
+"""
+
+
+def _bundled_rules_dir() -> Path:
+    """Path to the bundled semgrep rules directory.
+
+    ``__file__`` is ``src/secscan/scanners/sast.py``; the rules ship
+    alongside the rest of the package at ``src/secscan/rules/``.
+
+    Defensive (Codex Phase 2-G diff review): assert the resolved
+    path lies under the secscan package directory before returning
+    it. A symlink or sys.path shuffle that re-pointed ``__file__``
+    elsewhere would surface here as a ``RuntimeError`` rather than
+    silently feeding semgrep an attacker-controlled directory.
+    """
+    here = Path(__file__).resolve()
+    package_root = here.parent.parent  # src/secscan/
+    rules = (package_root / "rules").resolve()
+    if not rules.is_relative_to(package_root):
+        raise RuntimeError(
+            "bundled rules directory resolved outside the secscan package; "
+            "refusing to use it"
+        )
+    return rules
+
+
+def _expand_bundled_sentinels(configs: Sequence[str]) -> list[str]:
+    """Replace the ``secscan:extra`` sentinel with the rules dir path."""
+    out: list[str] = []
+    for cfg in configs:
+        if cfg == BUNDLED_RULES_SENTINEL:
+            bundled = _bundled_rules_dir()
+            if bundled.is_dir():
+                out.append(str(bundled))
+            # If the bundled rules are unexpectedly missing (e.g. a
+            # broken install), silently drop the sentinel rather than
+            # erroring — the user still gets their other rulesets.
+        else:
+            out.append(cfg)
+    return out
+
+
 def _reject_unsafe_configs(
     configs: Sequence[str], *, scan_root: Path, allow_unverified: bool
 ) -> tuple[str, ...]:
@@ -466,7 +524,9 @@ def _reject_unsafe_configs(
     Default-safe means:
     - Semgrep registry shorthand starting with ``p/`` or ``r/`` (Semgrep's
       public ruleset namespaces), OR
-    - A local filesystem path under the scan root.
+    - A local filesystem path under the scan root, OR
+    - The ``secscan:extra`` sentinel (Phase 2-G) — shipped bundled
+      rules are trusted because they ship with secscan itself.
 
     Anything else (arbitrary URL, absolute path outside the scan root, etc.)
     requires the user to opt in via ``[sast].allow_unverified_configs=true``.
@@ -482,6 +542,11 @@ def _reject_unsafe_configs(
     bad: list[str] = []
     for cfg in configs:
         if cfg.startswith(("p/", "r/")):
+            continue
+        if cfg == BUNDLED_RULES_SENTINEL:
+            # Phase 2-G: the sentinel is expanded later, after this
+            # gate, to the secscan-bundled rules path. Whitelist it
+            # here so the gate doesn't reject our own rules.
             continue
         # Codex 13th review: URL-like strings (anything with a scheme
         # separator) must NEVER fall into the path-resolution branch.

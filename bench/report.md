@@ -1,10 +1,10 @@
 # secscan benchmark report
 
-_secscan 0.7.0_
+_secscan 0.8.0_
 
 ## Summary
 
-- Overall recall: **13/15 (86.7%)**
+- Overall recall: **15/15 (100.0%)**
 - Total false positives (clean fixtures): **0**
 - Fixtures run: 6, skipped: 0
 - ≥ best single tool (integration parity): **4/4 fixtures**
@@ -18,7 +18,7 @@ _secscan 0.7.0_
 | deps | npm-vulnerable | 2 | 2 | 100.0% | 0 | npm audit | 2 | ✅ |
 | deps | pip-vulnerable | 3 | 3 | 100.0% | 0 | pip-audit | 15 | ✅ |
 | sast | javascript | 2 | 2 | 100.0% | 0 | semgrep | 2 | ✅ |
-| sast | python | 4 | 2 | 50.0% | 0 | semgrep | 5 | ✅ |
+| sast | python | 4 | 4 | 100.0% | 0 | semgrep | 7 | ✅ |
 
 ## Methodology notes
 
