@@ -5,23 +5,33 @@ build-backend = "hatchling.build"
 [project]
 name = "secscan"
 version = "0.19.0"
-description = "Cross-project vulnerability scanning CLI: dependency CVE, SAST, and secrets in one entry point."
+description = "Cross-project vulnerability scanning CLI: dependency CVE, SAST, secrets, DAST, IAST, container, SBOM, API fuzz, and supply chain integrity — one entry point."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "secscan maintainers" }]
+keywords = [
+    "security", "vulnerability", "scanner", "sast", "dast", "iast",
+    "sbom", "cve", "secrets", "supply-chain", "cli",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
 ]
+
 dependencies = [
     # PyYAML is needed by ``discover.py`` to parse pnpm-workspace.yaml when
     # the user has a pnpm monorepo. It's small (no compiled C deps on
@@ -38,6 +48,12 @@ dependencies = [
     # SIGTERM step.
     "psutil>=5.9",
 ]
+
+[project.urls]
+Homepage = "https://github.com/shunsukesuetsugu-prog/secscan"
+Repository = "https://github.com/shunsukesuetsugu-prog/secscan"
+Issues = "https://github.com/shunsukesuetsugu-prog/secscan/issues"
+Changelog = "https://github.com/shunsukesuetsugu-prog/secscan/releases"
 
 [project.optional-dependencies]
 # Phase 1C will register the sast scanner; install secscan[sast] to bring in
@@ -76,13 +92,32 @@ secscan = "secscan.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/secscan"]
 # Phase 2-G: ship the bundled semgrep rules with the wheel so
-# ``secscan:extra`` resolves to a real path after a clean pip install.
-# Hatch picks up non-Python files when they live under a packaged
-# directory, but we make the include explicit so a future rename
-# of ``src/secscan/rules`` doesn't silently drop the rules from
-# wheels.
-[tool.hatch.build.targets.wheel.force-include]
-"src/secscan/rules" = "secscan/rules"
+# ``secscan:extra`` resolves to a real path after a clean pip
+# install. Hatch picks up non-Python files (.yml rules) when
+# they live under a packaged directory, so no explicit
+# ``force-include`` is needed — that addition would have
+# duplicated every rule file in the wheel (UserWarning at
+# build time).
+
+[tool.hatch.build.targets.sdist]
+# A1: keep the published sdist focused on what end users actually
+# need. ``bench/`` contains synthetic-vulnerable fixtures and
+# external corpora (gitleaks-corpus, nodegoat, dvwa-modern, ...)
+# that would balloon the sdist to ~2 MB and aren't useful for
+# anyone installing via ``pip install secscan``.
+include = [
+    "src/secscan",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+exclude = [
+    "bench",
+    "tests",
+    ".github",
+    ".venv",
+    "dist",
+]
 
 [tool.ruff]
 line-length = 100
