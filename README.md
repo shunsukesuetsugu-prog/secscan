@@ -22,7 +22,8 @@ secscan all --path .
 | `dast`     | OWASP ZAP (Docker)   | live HTTP target probing — baseline + active (Phase 2-J) |
 | `config`   | Trivy (Docker)       | IaC: k8s manifests, Terraform, Dockerfile, Helm (Phase 2-L) |
 | `image`    | Trivy (Docker, image mode) | container image CVEs — OS pkg + language pkg vulns (Phase 2-M) |
-| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image when their targets are configured) |
+| `sbom`     | Syft + Grype (Docker)    | SBOM-based CVE matching: scan a directory / OCI image / existing SBOM file (Phase 2-N) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast/image/sbom when their targets are configured) |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -429,6 +430,81 @@ docker volume with the DB once and then mounts it read-only +
 cache-volume flag — it's a bench/CI plumbing concern, not an
 everyday operator setting.
 
+## SBOM scan (Syft + Grype, Phase 2-N)
+
+`secscan sbom` covers the gap between `deps` (lockfile-only) and
+`image` (built-image-only): it can scan a **local directory**
+(e.g. a `pip install`-ed venv), an **OCI image** in a registry,
+or an **already-existing SBOM file** (CycloneDX / SPDX JSON).
+Two containers run in sequence — Syft generates the SBOM, Grype
+matches it against its vulnerability DB — connected by a short-
+lived named docker volume.
+
+```sh
+# Scan a venv on disk (Syft + Grype pipeline)
+secscan sbom \
+  --target /opt/myapp/.venv \
+  --syft-image anchore/syft@sha256:... \
+  --grype-image anchore/grype@sha256:...
+
+# Scan an OCI image (--platform forwarded to Syft for multi-arch index)
+secscan sbom \
+  --target alpine@sha256:451eee...
+
+# Scan an existing CycloneDX SBOM file (skips Syft, runs only Grype)
+secscan sbom --target ./inventory/sbom.cdx.json
+
+# Multiple targets — finding-level dedup keeps the report clean
+secscan sbom \
+  --target /opt/app1 \
+  --target alpine@sha256:... \
+  --target ./suppliers/vendor-x.cdx.json
+```
+
+CLI flags / config:
+
+| Flag                  | Equivalent config key   | Purpose                                          |
+| --------------------- | ----------------------- | ------------------------------------------------ |
+| `--target <T>`        | `[sbom].targets`        | directory / image ref / SBOM file (repeatable).  |
+| `--syft-image <ref>`  | `[sbom].syft_image`     | digest-pinned Anchore Syft image.                |
+| `--grype-image <ref>` | `[sbom].grype_image`    | digest-pinned Anchore Grype image.               |
+| `--platform <os/arch>`| `[sbom].platform`       | platform passed to Syft for image targets (default `linux/amd64`). |
+| `--unsafe-allow-targets-outside-scan-root` | _(CLI only)_ | bypass scan-root confinement for CLI targets. **Does NOT affect config targets** (security). |
+
+Hard requirements / security pins:
+
+- **Path targets are confined to the scan root by default.** A
+  config target outside the scan root is rejected; the
+  `--unsafe-allow-targets-outside-scan-root` flag is CLI-only and
+  unconfines ONLY CLI targets. There is no config escape hatch —
+  this is a deliberate split so an attacker-controlled
+  `.secscan.toml` cannot couple with a CLI flag to bind-mount
+  `/etc` (or any other host path) into the Syft container.
+- **OCI image refs are digest-pinned.** `alpine:3.10` is rejected;
+  `alpine@sha256:<64 hex>` is required. Same posture as DAST and
+  image scanners.
+- **2-step pipeline uses a labeled named volume.** Each run
+  creates `secscan-sbom-<32 hex>` via `secrets.token_hex(16)`,
+  cleans it up in `try/finally`. A SIGKILL or host crash mid-scan
+  can leave the volume orphaned; sweep periodically with
+  `docker volume prune -f --filter label=secscan-tmp=1`.
+- **SBOM size cap (32 MiB)** applies to both operator-supplied
+  SBOM files AND Syft's output, so a hostile SBOM cannot OOM
+  Grype.
+- **Top-level symlinks refused.** A `--target` that's a symlink
+  is rejected outright (defence in depth against scan-root
+  escape via symlink swap).
+
+### Cross-engine comparison with `image`
+
+`secscan image` (Trivy) and `secscan sbom` (Grype) can scan the
+same OCI image and produce overlapping findings. **This is by
+design** — the two engines use different advisory DBs and CPE
+matching strategies, so a CVE present in one and absent in the
+other is a meaningful signal worth investigating. secscan keeps
+both findings (scanner name is part of the fingerprint), so a
+`baseline accept` on one does NOT silence the other.
+
 ## Detection-rate benchmark
 
 `bench/run.py` measures how much of a curated known-vulnerable
@@ -569,6 +645,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-L   | Trivy config scan (IaC/k8s/Docker/Helm)             | done (v0.12.0)        |
 | 2-K   | ZAP auth-flow via HTTP header injection (`--auth-header`)  | done (v0.13.0) |
 | 2-M   | container image CVE scan (`secscan image`, Trivy image mode)   | done (v0.14.0) |
+| 2-N   | SBOM-based CVE scan (`secscan sbom`, Syft + Grype 2-step pipeline) | done (v0.15.0) |
 
 ## Development
 

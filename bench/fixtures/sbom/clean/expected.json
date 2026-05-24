@@ -1,0 +1,31 @@
+{
+  "tool_under_test": "secscan sbom",
+  "comparison_tool": "grype (direct, against the same SBOM)",
+  "advisory_db_snapshot": "2026-05-24",
+  "sbom_file": "sbom.cdx.json",
+  "sbom_provenance": {
+    "generator": "anchore/syft@sha256:86fde6445b483d902fe011dd9f68c4987dd94e07da1e9edc004e3c2422650de6",
+    "target_image": "alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d",
+    "target_tag_at_generation_time": "alpine:3.21",
+    "generated_at": "2026-05-24",
+    "format": "CycloneDX 1.6 JSON"
+  },
+  "notes": [
+    "Phase 2-N clean fixture. alpine:3.21 is the current stable",
+    "release as of the pinning date. Grype reports a small number",
+    "of unfixed CVEs even on a current alpine — those are not",
+    "secscan false positives, they're genuine 'no upstream fix",
+    "available yet' findings the operator decides whether to",
+    "accept. We allowlist the specific CVE IDs so they don't count",
+    "toward the bench FP score, following the same `policy_driven",
+    "_check_ids` pattern Phase 2-L uses for Trivy.",
+    "",
+    "When the Grype DB rotates and new unfixed CVEs appear on this",
+    "image, add them to ``policy_driven_cve_ids`` rather than",
+    "treating the count change as a regression."
+  ],
+  "expected_vulnerabilities": [],
+  "policy_driven_cve_ids": [
+    "CVE-2025-60876"
+  ]
+}

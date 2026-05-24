@@ -230,6 +230,38 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
             timeout_seconds=cfg.timeout_seconds,
             extra=MappingProxyType({"image": image}),
         )
+    if scanner_name == "sbom":
+        # Phase 2-N: Syft + Grype 2-step pipeline via docker.
+        # Local import to keep the optional scanner out of every
+        # orchestrator call.
+        from .scanners.sbom._pinned import (
+            DEFAULT_GRYPE_IMAGE,
+            DEFAULT_SYFT_IMAGE,
+            DEFAULT_TARGET_PLATFORM,
+        )
+
+        sbom_cfg = config.sbom
+        syft_image = sbom_cfg.syft_image.strip() or DEFAULT_SYFT_IMAGE
+        grype_image = sbom_cfg.grype_image.strip() or DEFAULT_GRYPE_IMAGE
+        platform = sbom_cfg.platform.strip() or DEFAULT_TARGET_PLATFORM
+        return ScanConfig(
+            timeout_seconds=sbom_cfg.timeout_seconds,
+            extra=MappingProxyType(
+                {
+                    # Codex Phase 2-N diff review MUST-FIX
+                    # (security): pass the two target sets
+                    # separately so the scanner can enforce
+                    # confinement per-origin.
+                    "targets": sbom_cfg.targets,
+                    "cli_targets": sbom_cfg.cli_targets,
+                    "unconfine_cli_targets": sbom_cfg.unconfine_cli_targets,
+                    "syft_image": syft_image,
+                    "grype_image": grype_image,
+                    "platform": platform,
+                    "cache_volume": sbom_cfg.cache_volume,
+                }
+            ),
+        )
     if scanner_name == "image":
         # Phase 2-M: Trivy image-vulnerability scan. Local import
         # so test envs without docker don't pay the import cost.

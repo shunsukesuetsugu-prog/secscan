@@ -846,6 +846,91 @@ def _bench_image(fixture_dir: Path) -> FixtureResult:
     )
 
 
+def _bench_sbom(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-N: run secscan sbom against a committed CycloneDX
+    SBOM fixture and count expected CVE IDs that fired.
+
+    Recall = unique CVE IDs from ``expected_vulnerabilities`` that
+    appear in secscan's output. ``clean`` fixtures (empty expected
+    set) contribute to the FP count instead, modulo a
+    ``policy_driven_cve_ids`` allowlist for CVEs Grype reports
+    against the current stable image (unfixed upstream) — see
+    Phase 2-L's ``_bench_config`` for the same pattern.
+
+    The fixture's SBOM JSON is committed; the bench does NOT
+    re-generate it (Codex MUST-FIX #2: no live ``pip install`` /
+    network dependency in the default bench).
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    if shutil.which("docker") is None:
+        return FixtureResult(
+            scanner="sbom",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="docker not installed",
+        )
+
+    sbom_filename = expected.get("sbom_file", "sbom.cdx.json")
+    sbom_path = fixture_dir / sbom_filename
+    if not sbom_path.is_file():
+        return FixtureResult(
+            scanner="sbom",
+            fixture_name=fixture_dir.name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason=f"missing SBOM fixture file {sbom_filename}",
+        )
+
+    # Resolve the Grype scanner image. The fixture's
+    # ``sbom_provenance.generator`` is purely informational
+    # (records WHICH Syft made the SBOM); the active scan uses
+    # the Grype pin from the secscan codebase.
+    from secscan.scanners.sbom import DEFAULT_GRYPE_IMAGE
+
+    expected_entries = expected.get("expected_vulnerabilities", [])
+    expected_ids = [
+        e["cve_id"] for e in expected_entries
+        if isinstance(e, dict) and e.get("cve_id")
+    ]
+    policy_driven = set(expected.get("policy_driven_cve_ids", []))
+
+    extra_args = [
+        "--target",
+        str(sbom_path),
+        "--grype-image",
+        DEFAULT_GRYPE_IMAGE,
+        "--unsafe-allow-targets-outside-scan-root",
+    ]
+    payload = _run_secscan_scan("sbom", fixture_dir, extra_args=extra_args)
+    findings = payload.get("findings", [])
+    rule_ids = {f.get("rule_id", "") for f in findings}
+    detected = sum(1 for cve in expected_ids if cve in rule_ids)
+
+    fp = 0
+    if not expected_ids:
+        expected_set = set(expected_ids)
+        for f in findings:
+            if f.get("severity") not in ("critical", "high", "medium"):
+                continue
+            rid = f.get("rule_id", "")
+            if rid in expected_set:
+                continue
+            if rid in policy_driven:
+                continue
+            fp += 1
+    return FixtureResult(
+        scanner="sbom",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_ids),
+        detected_count=detected,
+        false_positive_count=fp,
+        raw_finding_count=len(findings),
+        comparison_tool="grype",
+    )
+
+
 def _bench_external(fixture_dir: Path) -> FixtureResult:
     """Phase 2-I dispatcher: SAST → ``_bench_external_sast``,
     secrets → ``_bench_external_secrets``."""
@@ -1611,6 +1696,7 @@ def run_all(
     include_dast_active: bool = False,
     include_dast_authflow: bool = False,
     include_image: bool = False,
+    include_sbom: bool = False,
     include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
@@ -1658,6 +1744,13 @@ def run_all(
                 if not sub.is_dir() or not (sub / "expected.json").exists():
                     continue
                 results.append(_bench_image(sub))
+    if include_sbom:
+        sbom_root = SAFE_FIXTURE_ROOT / "sbom"
+        if sbom_root.is_dir():
+            for sub in sorted(sbom_root.iterdir()):
+                if not sub.is_dir() or not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_sbom(sub))
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -1825,6 +1918,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--sbom-bench",
+        action="store_true",
+        dest="sbom_bench",
+        help=(
+            "Phase 2-N: include SBOM-based CVE bench (runs secscan "
+            "sbom against committed CycloneDX SBOM fixtures of "
+            "alpine:3.10 vulnerable + alpine:3.21 clean). Network "
+            "is needed only for Grype's DB download on first run."
+        ),
+    )
+    parser.add_argument(
         "--dast-authflow",
         action="store_true",
         dest="dast_authflow",
@@ -1864,6 +1968,7 @@ def main(argv: list[str] | None = None) -> int:
             include_dast_active=args.dast_active,
             include_dast_authflow=args.dast_authflow,
             include_image=args.image_bench,
+            include_sbom=args.sbom_bench,
             include_external=args.external,
         )
     except BenchError as exc:

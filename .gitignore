@@ -34,3 +34,6 @@ Thumbs.db
 
 # secscan local state
 .secscan/
+
+# Runtime artifacts from Claude Code (per-session, not source)
+.claude/

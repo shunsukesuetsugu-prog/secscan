@@ -1,0 +1,51 @@
+{
+  "tool_under_test": "secscan sbom",
+  "comparison_tool": "grype (direct, against the same SBOM)",
+  "advisory_db_snapshot": "2026-05-24",
+  "sbom_file": "sbom.cdx.json",
+  "sbom_provenance": {
+    "generator": "anchore/syft@sha256:86fde6445b483d902fe011dd9f68c4987dd94e07da1e9edc004e3c2422650de6",
+    "target_image": "alpine@sha256:451eee8bedcb2f029756dc3e9d73bab0e7943c1ac55cff3a4861c52a0fdd3e98",
+    "target_tag_at_generation_time": "alpine:3.10",
+    "generated_at": "2026-05-24",
+    "format": "CycloneDX 1.6 JSON",
+    "note": [
+      "The SBOM is committed as a fixture file — bench/run.py does NOT",
+      "re-generate it. This is the Codex MUST-FIX #2 carry-over: a",
+      "live `python -m venv` + `pip install` would make the bench",
+      "PyPI-network-dependent and flaky in CI. The cost is that the",
+      "SBOM ages with the alpine release it represents; rotate the",
+      "fixture by re-running ``syft registry:<digest> -o cyclonedx-",
+      "json > sbom.cdx.json`` and updating ``target_image`` here."
+    ]
+  },
+  "notes": [
+    "Phase 2-N sbom-scan benchmark. The SBOM describes alpine 3.10",
+    "(EOL since 2021-05). Grype's current advisory DB surfaces a",
+    "large CVE set against it — 100+ findings is normal. We pin a",
+    "small set of well-known CRITICAL CVEs as the recall target;",
+    "the full count drifts as the Grype DB rolls forward but the",
+    "anchor CVEs below are stable because the vulnerable apk/openssl/",
+    "zlib package versions are fixed in the SBOM file itself."
+  ],
+  "expected_vulnerabilities": [
+    {
+      "cve_id": "CVE-2021-36159",
+      "package": "apk-tools",
+      "min_severity": "CRITICAL",
+      "note": "libfetch in alpine 3.10 fails Content-Length validation on HTTP redirects → buffer overflow. Same finding as Phase 2-M image bench — cross-engine validation: secscan image (Trivy) and secscan sbom (Grype) should both detect this on the same target."
+    },
+    {
+      "cve_id": "CVE-2021-3711",
+      "package": "openssl",
+      "min_severity": "CRITICAL",
+      "note": "SM2 decryption buffer overflow in alpine 3.10's openssl 1.1.1k."
+    },
+    {
+      "cve_id": "CVE-2022-37434",
+      "package": "zlib",
+      "min_severity": "CRITICAL",
+      "note": "heap-based buffer over-read in inflate.c via a large gzip header extra field."
+    }
+  ]
+}

@@ -36,6 +36,8 @@ DEFAULT_DAST_TIMEOUT = 900
 DEFAULT_CONFIG_TIMEOUT = 300
 DEFAULT_IMAGE_TIMEOUT = 600
 DEFAULT_IMAGE_PLATFORM = "linux/amd64"
+DEFAULT_SBOM_TIMEOUT = 900
+DEFAULT_SBOM_PLATFORM = "linux/amd64"
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -99,6 +101,7 @@ class UnknownSeverityPolicy:
     dast: str = "warn"
     config: str = "warn"
     image: str = "warn"
+    sbom: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -189,6 +192,65 @@ class ImageConfig:
 
 
 @dataclass(frozen=True)
+class SbomConfig:
+    """Phase 2-N: ``secscan sbom`` (Syft + Grype) configuration.
+
+    Like DAST/image, the SBOM scanner is **opt-in**: it only runs
+    when ``targets`` is non-empty (set via ``[sbom].targets`` in
+    ``.secscan.toml`` or ``--target`` on the CLI). With
+    ``targets=()`` the scanner is filtered out of ``secscan all``.
+
+    Each target string is one of:
+
+    - existing local directory (``/opt/venv``)
+    - existing SBOM JSON file (``.cdx.json`` / ``.spdx.json``)
+    - non-existing digest-pinned OCI image ref
+
+    Target classification is done at scan time (not parse time)
+    because the existence check depends on the operator's
+    filesystem state.
+
+    ``confine_to_scan_root`` enforces (Codex MUST-FIX #2) that
+    config-supplied path / SBOM-file targets live under the scan
+    root. CLI-supplied targets bypass this via the
+    ``--unsafe-allow-targets-outside-scan-root`` flag (or by
+    setting this to False explicitly in config).
+    """
+
+    targets: tuple[str, ...] = ()
+    """Targets supplied via ``[sbom].targets`` in .secscan.toml.
+
+    Codex Phase 2-N diff review MUST-FIX (security): config-origin
+    targets are ALWAYS confined to the scan root. There is no
+    config-level escape hatch — an attacker-controlled
+    .secscan.toml cannot trick secscan into bind-mounting outside
+    the operator-supplied scan tree.
+    """
+
+    cli_targets: tuple[str, ...] = ()
+    """Targets supplied via ``--target`` on the CLI. Subject to
+    the CLI-only ``--unsafe-allow-targets-outside-scan-root`` flag.
+
+    Kept separate from ``targets`` so the scanner adapter can apply
+    confinement per-origin: config targets are ALWAYS confined,
+    CLI targets are confined only when ``unconfine_cli_targets``
+    is False. ``_apply_cli_overrides`` writes to this field and
+    NEVER to ``targets`` itself."""
+
+    unconfine_cli_targets: bool = False
+    """Set by the ``--unsafe-allow-targets-outside-scan-root`` CLI
+    flag ONLY. Not parseable from config. When True, CLI targets
+    bypass the scan-root confinement check; config targets remain
+    confined regardless."""
+
+    syft_image: str = ""
+    grype_image: str = ""
+    platform: str = DEFAULT_SBOM_PLATFORM
+    cache_volume: str = ""
+    timeout_seconds: int = DEFAULT_SBOM_TIMEOUT
+
+
+@dataclass(frozen=True)
 class DastConfig:
     """Phase 2-D DAST scanner configuration.
 
@@ -252,6 +314,7 @@ class ProjectConfig:
     dast: DastConfig = field(default_factory=DastConfig)
     config: ConfigScannerConfig = field(default_factory=ConfigScannerConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
+    sbom: SbomConfig = field(default_factory=SbomConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -329,6 +392,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         dast=cfg.dast,
         config=cfg.config,
         image=cfg.image,
+        sbom=cfg.sbom,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -338,7 +402,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
 # --- Parsing primitives ----------------------------------------------------
 
 _VALID_SCANNERS = frozenset(
-    {"deps", "sast", "secrets", "dast", "config", "image"}
+    {"deps", "sast", "secrets", "dast", "config", "image", "sbom"}
 )
 
 
@@ -423,6 +487,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
             "dast",
             "config",
             "image",
+            "sbom",
             "baseline",
             "severity_overrides",
         },
@@ -438,6 +503,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         _require_table(raw.get("config"), "config")
     )
     image_scanner = _parse_image(_require_table(raw.get("image"), "image"))
+    sbom_scanner = _parse_sbom(_require_table(raw.get("sbom"), "sbom"))
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -476,6 +542,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         dast=dast,
         config=config_scanner,
         image=image_scanner,
+        sbom=sbom_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -485,7 +552,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
 def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
     _reject_unknown(
         table,
-        {"deps", "sast", "secrets", "dast", "config", "image"},
+        {"deps", "sast", "secrets", "dast", "config", "image", "sbom"},
         "scan.severity_unknown_policy",
     )
     defaults = UnknownSeverityPolicy()
@@ -606,6 +673,58 @@ def _parse_image(table: dict[str, object]) -> ImageConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_IMAGE_TIMEOUT),
             "image.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_sbom(table: dict[str, object]) -> SbomConfig:
+    """Phase 2-N: parse the ``[sbom]`` section.
+
+    ``targets`` may be omitted (empty default → opt-in skip). Each
+    entry must be a non-blank string (Codex Phase 2-M FIX_NEEDED
+    carry-over). Per-target classification (file / dir / image
+    ref) is deferred to scan time.
+    """
+    # Codex Phase 2-N diff review MUST-FIX (security): no
+    # ``confine_to_scan_root`` key in config. The unconfine flag
+    # is CLI-only.
+    _reject_unknown(
+        table,
+        {
+            "targets",
+            "syft_image",
+            "grype_image",
+            "platform",
+            "cache_volume",
+            "timeout_seconds",
+        },
+        "sbom",
+    )
+    raw_targets = _require_str_list(
+        table.get("targets", []), "sbom.targets"
+    )
+    for i, t in enumerate(raw_targets):
+        if not t.strip():
+            raise ConfigError(
+                f"sbom.targets[{i}] must not be blank — "
+                "remove the entry or replace it with a real target"
+            )
+    return SbomConfig(
+        targets=raw_targets,
+        syft_image=_require_str(table.get("syft_image", ""), "sbom.syft_image"),
+        grype_image=_require_str(
+            table.get("grype_image", ""), "sbom.grype_image"
+        ),
+        platform=_require_str(
+            table.get("platform", DEFAULT_SBOM_PLATFORM), "sbom.platform"
+        ),
+        cache_volume=_require_str(
+            table.get("cache_volume", ""), "sbom.cache_volume"
+        ),
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_SBOM_TIMEOUT),
+            "sbom.timeout_seconds",
             minimum=1,
         ),
     )

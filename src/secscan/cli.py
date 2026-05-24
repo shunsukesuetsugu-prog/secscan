@@ -49,6 +49,7 @@ from .scanners.dast import DastScanner
 from .scanners.deps_scanner import DepsScanner
 from .scanners.image import ImageScanner
 from .scanners.sast import SastScanner
+from .scanners.sbom import SbomScanner
 from .scanners.secrets import SecretsScanner
 
 # Registry of scanners available in this build.
@@ -59,6 +60,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     DastScanner,
     ConfigScanner,
     ImageScanner,
+    SbomScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -95,8 +97,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # secscan secrets / deps / sast / dast / config / image / all — share flags.
-    for cmd in ("secrets", "deps", "sast", "dast", "config", "image", "all"):
+    # secscan secrets / deps / sast / dast / config / image / sbom / all
+    for cmd in (
+        "secrets",
+        "deps",
+        "sast",
+        "dast",
+        "config",
+        "image",
+        "sbom",
+        "all",
+    ):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
         _add_common_scan_args(sub)
         if cmd == "all":
@@ -107,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
                 metavar="SCANNER",
                 help=(
                     "scanner to skip (repeatable). Choices: secrets, deps, "
-                    "sast, dast, config, image."
+                    "sast, dast, config, image, sbom."
                 ),
             )
         if cmd == "config":
@@ -118,6 +129,64 @@ def _build_parser() -> argparse.ArgumentParser:
                 help=(
                     "OCI image reference (digest-pinned) for the Trivy "
                     "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
+            )
+        if cmd == "sbom":
+            sub.add_argument(
+                "--target",
+                action="append",
+                default=None,
+                metavar="T",
+                dest="sbom_targets",
+                help=(
+                    "SBOM target (repeatable). Either: (a) an existing "
+                    "local directory, (b) an existing SBOM JSON file "
+                    "(.cdx.json / .spdx.json), or (c) a digest-pinned "
+                    "OCI image ref. Unions with [sbom].targets in "
+                    ".secscan.toml."
+                ),
+            )
+            sub.add_argument(
+                "--syft-image",
+                default=None,
+                metavar="IMAGE",
+                dest="sbom_syft_image",
+                help=(
+                    "OCI image reference (digest-pinned) for the Anchore "
+                    "Syft scanner container."
+                ),
+            )
+            sub.add_argument(
+                "--grype-image",
+                default=None,
+                metavar="IMAGE",
+                dest="sbom_grype_image",
+                help=(
+                    "OCI image reference (digest-pinned) for the Anchore "
+                    "Grype scanner container."
+                ),
+            )
+            sub.add_argument(
+                "--platform",
+                default=None,
+                metavar="OS/ARCH",
+                dest="sbom_platform",
+                help=(
+                    "Platform forwarded to Syft for image targets "
+                    "(default: linux/amd64). Multi-arch index digests "
+                    "resolve deterministically via this flag."
+                ),
+            )
+            sub.add_argument(
+                "--unsafe-allow-targets-outside-scan-root",
+                action="store_true",
+                dest="sbom_unsafe_allow_outside_scan_root",
+                help=(
+                    "Allow CLI-supplied path / SBOM-file targets that "
+                    "live outside the scan root. CONFIG-supplied targets "
+                    "are ALWAYS confined. Use only when an operator "
+                    "explicitly wants to scan a directory outside the "
+                    "current scan tree."
                 ),
             )
         if cmd == "image":
@@ -391,6 +460,22 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
                 "secscan image requires at least one target image. Pass "
                 "--image '<repo>[:tag]@sha256:<digest>' (repeatable) or "
                 "set [image].refs in .secscan.toml."
+            )
+            return int(ExitCode.SCAN_ERROR)
+
+    # Phase 2-N: ``secscan sbom`` requires at least one non-blank
+    # target. Same false-green guard as ``secscan image``.
+    if args.command == "sbom":
+        non_blank_targets = [
+            t
+            for t in (*config.sbom.targets, *config.sbom.cli_targets)
+            if t and t.strip()
+        ]
+        if not non_blank_targets:
+            _print_error(
+                "secscan sbom requires at least one target. Pass "
+                "--target <path-or-image> (repeatable) or set "
+                "[sbom].targets in .secscan.toml."
             )
             return int(ExitCode.SCAN_ERROR)
 
@@ -724,6 +809,55 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
             new, image=replace(new.image, platform=image_platform)
         )
 
+    # Phase 2-N sbom-scanner CLI overrides. Same blank-stripping
+    # discipline as Phase 2-M's image refs (Codex Phase 2-M diff
+    # review FIX_NEEDED) — a ``--target " "`` must NOT inflate
+    # the dispatcher's "zero targets" check into a non-empty tuple
+    # that then becomes a silent no-op inside the scanner.
+    sbom_targets = getattr(args, "sbom_targets", None)
+    if sbom_targets:
+        # Codex Phase 2-N diff review MUST-FIX (security): CLI
+        # targets land in a SEPARATE ``cli_targets`` slot so the
+        # scanner can apply confinement per-origin. Merging them
+        # into ``targets`` would let the CLI-only unconfine flag
+        # also unconfine config-supplied targets — a privilege
+        # widening across trust boundaries.
+        merged_cli: list[str] = list(new.sbom.cli_targets)
+        for t in sbom_targets:
+            if not isinstance(t, str):
+                continue
+            cleaned = t.strip()
+            if not cleaned:
+                continue
+            if cleaned not in merged_cli and cleaned not in new.sbom.targets:
+                merged_cli.append(cleaned)
+        new = replace(
+            new, sbom=replace(new.sbom, cli_targets=tuple(merged_cli))
+        )
+    sbom_syft_image = getattr(args, "sbom_syft_image", None)
+    if isinstance(sbom_syft_image, str) and sbom_syft_image:
+        new = replace(
+            new, sbom=replace(new.sbom, syft_image=sbom_syft_image)
+        )
+    sbom_grype_image = getattr(args, "sbom_grype_image", None)
+    if isinstance(sbom_grype_image, str) and sbom_grype_image:
+        new = replace(
+            new, sbom=replace(new.sbom, grype_image=sbom_grype_image)
+        )
+    sbom_platform = getattr(args, "sbom_platform", None)
+    if isinstance(sbom_platform, str) and sbom_platform:
+        new = replace(
+            new, sbom=replace(new.sbom, platform=sbom_platform)
+        )
+    if getattr(args, "sbom_unsafe_allow_outside_scan_root", False):
+        # Codex Phase 2-N diff review MUST-FIX (security): the
+        # unconfine flag is CLI-only and applies ONLY to CLI
+        # targets. Config-supplied ``[sbom].targets`` are still
+        # confined to the scan root regardless.
+        new = replace(
+            new, sbom=replace(new.sbom, unconfine_cli_targets=True)
+        )
+
     auth_headers = getattr(args, "auth_headers", None)
     if auth_headers:
         new = replace(
@@ -758,6 +892,9 @@ def _build_scanner_instances(
     instances: list[Scanner] = []
     target_configured = bool(config.dast.target.strip())
     image_refs_configured = bool(config.image.refs)
+    sbom_targets_configured = bool(
+        config.sbom.targets or config.sbom.cli_targets
+    )
     for cls in ALL_SCANNERS:
         if cls.name == "dast" and not target_configured and command != "dast":
             continue
@@ -770,6 +907,13 @@ def _build_scanner_instances(
             cls.name == "image"
             and not image_refs_configured
             and command != "image"
+        ):
+            continue
+        # Phase 2-N: same opt-in posture for sbom scanner.
+        if (
+            cls.name == "sbom"
+            and not sbom_targets_configured
+            and command != "sbom"
         ):
             continue
         instances.append(cls())
