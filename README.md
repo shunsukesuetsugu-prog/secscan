@@ -1,6 +1,8 @@
 # secscan
 
 [![CI](https://github.com/shunsukesuetsugu-prog/secscan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shunsukesuetsugu-prog/secscan/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/shun-secscan.svg)](https://pypi.org/project/shun-secscan/)
+[![Python](https://img.shields.io/pypi/pyversions/shun-secscan.svg)](https://pypi.org/project/shun-secscan/)
 
 Cross-project vulnerability scanning CLI for Web (Node/TypeScript) and Python
 projects.
