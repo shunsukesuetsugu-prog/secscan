@@ -1,5 +1,7 @@
 # secscan
 
+[![CI](https://github.com/shunsukesuetsugu-prog/secscan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shunsukesuetsugu-prog/secscan/actions/workflows/ci.yml)
+
 Cross-project vulnerability scanning CLI for Web (Node/TypeScript) and Python
 projects.
 
