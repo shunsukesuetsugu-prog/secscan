@@ -33,6 +33,7 @@ DEFAULT_DEPS_TIMEOUT = 300
 DEFAULT_SAST_TIMEOUT = 900
 DEFAULT_SECRETS_TIMEOUT = 300
 DEFAULT_DAST_TIMEOUT = 900
+DEFAULT_CONFIG_TIMEOUT = 300
 DEFAULT_BASELINE_PATH = ".secscan/baseline.json"
 DEFAULT_BASELINE_EXPIRY_DAYS = 90
 DEFAULT_SEMGREP_CONFIG: tuple[str, ...] = (
@@ -94,6 +95,7 @@ class UnknownSeverityPolicy:
     sast: str = "warn"
     secrets: str = "fail"
     dast: str = "warn"
+    config: str = "warn"
 
     def for_scanner(self, scanner: str) -> str:
         return getattr(self, scanner, "warn")
@@ -122,6 +124,22 @@ class SastConfig:
 class SecretsConfig:
     timeout_seconds: int = DEFAULT_SECRETS_TIMEOUT
     # redact_secrets is intentionally NOT exposed. Redaction is mandatory.
+
+
+@dataclass(frozen=True)
+class ConfigScannerConfig:
+    """Phase 2-L: ``secscan config`` (Trivy IaC scanner) configuration.
+
+    Like DAST, the config scanner runs Trivy via docker, with the
+    scan root bind-mounted read-only at ``/work``. The ``image``
+    field follows the same digest-pinned convention as DAST's
+    ``zap-image``.
+    """
+
+    image: str = ""
+    """Empty string means "use the pinned default Trivy image"
+    (see ``config_scanner/_pinned.py``)."""
+    timeout_seconds: int = DEFAULT_CONFIG_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -176,6 +194,7 @@ class ProjectConfig:
     sast: SastConfig = field(default_factory=SastConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     dast: DastConfig = field(default_factory=DastConfig)
+    config: ConfigScannerConfig = field(default_factory=ConfigScannerConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     severity_overrides: dict[str, dict[str, Severity]] = field(default_factory=dict)
     """Mapping ``{scanner: {rule_id: Severity}}``. Applied after parsing,
@@ -251,6 +270,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
         sast=cfg.sast,
         secrets=cfg.secrets,
         dast=cfg.dast,
+        config=cfg.config,
         baseline=baseline,
         severity_overrides=cfg.severity_overrides,
         source=cfg.source,
@@ -259,7 +279,7 @@ def _with_resolved_baseline(cfg: ProjectConfig, anchor: Path) -> ProjectConfig:
 
 # --- Parsing primitives ----------------------------------------------------
 
-_VALID_SCANNERS = frozenset({"deps", "sast", "secrets", "dast"})
+_VALID_SCANNERS = frozenset({"deps", "sast", "secrets", "dast", "config"})
 
 
 def _require_table(value: object, name: str) -> dict[str, object]:
@@ -335,7 +355,16 @@ def _reject_unknown(table: dict[str, object], known: set[str], section: str) -> 
 def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     _reject_unknown(
         raw,
-        {"scan", "deps", "sast", "secrets", "dast", "baseline", "severity_overrides"},
+        {
+            "scan",
+            "deps",
+            "sast",
+            "secrets",
+            "dast",
+            "config",
+            "baseline",
+            "severity_overrides",
+        },
         "root",
     )
 
@@ -344,6 +373,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
     sast = _parse_sast(_require_table(raw.get("sast"), "sast"))
     secrets = _parse_secrets(_require_table(raw.get("secrets"), "secrets"))
     dast = _parse_dast(_require_table(raw.get("dast"), "dast"))
+    config_scanner = _parse_config_scanner(
+        _require_table(raw.get("config"), "config")
+    )
     baseline = _parse_baseline(_require_table(raw.get("baseline"), "baseline"))
     overrides = _parse_overrides(
         _require_table(raw.get("severity_overrides"), "severity_overrides")
@@ -380,6 +412,7 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
         sast=sast,
         secrets=secrets,
         dast=dast,
+        config=config_scanner,
         baseline=baseline,
         severity_overrides=overrides,
         source=source,
@@ -388,7 +421,9 @@ def _parse(raw: dict[str, object], source: Path) -> ProjectConfig:
 
 def _parse_unknown_policy(table: dict[str, object]) -> UnknownSeverityPolicy:
     _reject_unknown(
-        table, {"deps", "sast", "secrets", "dast"}, "scan.severity_unknown_policy"
+        table,
+        {"deps", "sast", "secrets", "dast", "config"},
+        "scan.severity_unknown_policy",
     )
     defaults = UnknownSeverityPolicy()
     values: dict[str, str] = {}
@@ -454,6 +489,18 @@ def _parse_secrets(table: dict[str, object]) -> SecretsConfig:
         timeout_seconds=_require_int(
             table.get("timeout_seconds", DEFAULT_SECRETS_TIMEOUT),
             "secrets.timeout_seconds",
+            minimum=1,
+        ),
+    )
+
+
+def _parse_config_scanner(table: dict[str, object]) -> ConfigScannerConfig:
+    _reject_unknown(table, {"image", "timeout_seconds"}, "config")
+    return ConfigScannerConfig(
+        image=_require_str(table.get("image", ""), "config.image"),
+        timeout_seconds=_require_int(
+            table.get("timeout_seconds", DEFAULT_CONFIG_TIMEOUT),
+            "config.timeout_seconds",
             minimum=1,
         ),
     )

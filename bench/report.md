@@ -1,12 +1,12 @@
 # secscan benchmark report
 
-_secscan 0.10.0_
+_secscan 0.12.0_
 
 ## Summary
 
-- Overall recall: **45/47 (95.7%)**
+- Overall recall: **27/27 (100.0%)**
 - Total false positives (clean fixtures): **0**
-- Fixtures run: 11, skipped: 0
+- Fixtures run: 10, skipped: 0
 - ≥ best single tool (integration parity): **4/4 fixtures**
 
 ## Per-fixture detail
@@ -19,11 +19,10 @@ _secscan 0.10.0_
 | deps | pip-vulnerable | 3 | 3 | 100.0% | 0 | pip-audit | 15 | ✅ |
 | sast | javascript | 2 | 2 | 100.0% | 0 | semgrep | 2 | ✅ |
 | sast | python | 4 | 4 | 100.0% | 0 | semgrep | 7 | ✅ |
-| dast | juice-shop | 5 | 5 | 100.0% | 0 | zap-baseline | — | — |
-| dast | webgoat | 6 | 6 | 100.0% | 0 | zap-baseline | — | — |
-| external/secrets | gitleaks-corpus | 2 | 2 | 100.0% | 0 | gitleaks (own corpus) | — | — |
-| external/sast | nodegoat | 10 | 8 | 80.0% | 0 | — | — | — |
-| external/sast | pygoat | 9 | 9 | 100.0% | 0 | — | — | — |
+| config | clean | 0 | 0 | 100.0% | 0 | trivy config | — | — |
+| config | dockerfile-vulnerable | 3 | 3 | 100.0% | 0 | trivy config | — | — |
+| config | k8s-vulnerable | 6 | 6 | 100.0% | 0 | trivy config | — | — |
+| config | terraform-vulnerable | 3 | 3 | 100.0% | 0 | trivy config | — | — |
 
 ## Methodology notes
 

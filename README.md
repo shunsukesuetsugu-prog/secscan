@@ -19,8 +19,9 @@ secscan all --path .
 | `secrets`  | gitleaks v8+         | hard-coded API keys, tokens, credentials            |
 | `deps`     | npm / pnpm / yarn / pip-audit | declared dependencies with known CVEs/GHSAs |
 | `sast`     | semgrep              | source-level vulnerability patterns                 |
-| `dast`     | OWASP ZAP (Docker)   | live HTTP target probing (Phase 2-D)                |
-| `all`      | every registered scanner | secrets + deps + sast (and dast when `dast.target` is configured) |
+| `dast`     | OWASP ZAP (Docker)   | live HTTP target probing — baseline + active (Phase 2-J) |
+| `config`   | Trivy (Docker)       | IaC: k8s manifests, Terraform, Dockerfile, Helm (Phase 2-L) |
+| `all`      | every registered scanner | secrets + deps + sast + config (and dast when `dast.target` is configured) |
 | `baseline` | (self)               | manage known-issue suppression file                 |
 
 ## Install
@@ -449,8 +450,8 @@ specific Codex review iteration that motivated each invariant.
 | 2-H   | DAST 自動計測 (Juice Shop + docker volume lifecycle) | done (v0.9.0)         |
 | 2-I   | 外部 benchmark (NodeGoat / PyGoat / WebGoat / gitleaks corpus) | done (v0.10.0) |
 | 2-J   | ZAP active scan opt-in (`--mode=active` + `--dast-active`) | done (v0.11.0)    |
+| 2-L   | Trivy config scan (IaC/k8s/Docker/Helm)             | done (v0.12.0)        |
 | 2-K   | ZAP auth-flow context (login → session → 保護リソース) | planned             |
-| 2-L+  | Trivy config scan (IaC/k8s/Docker)                  | planned             |
 
 ## Development
 

@@ -62,6 +62,24 @@ To add a new synthetic secret:
 3. Compute the SHA-256 (`shasum -a 256 <file>`) and add the entry.
 4. Commit both file and manifest together.
 
+## Policy-driven checks (`policy_driven_check_ids`)
+
+The `config` scanner (Phase 2-L, Trivy) ships some checks whose
+firing depends on an **organisation-specific policy bundle**
+rather than on the manifest itself. The canonical example is
+`KSV-0125 "Restrict container images to trusted registries"`:
+Trivy has no default allowlist, so it always fires until the
+operator configures their org's trusted registry set.
+
+For benchmark purposes these checks would inflate the false-
+positive count on `clean/` fixtures even though the fixture is
+itself correctly hardened. Each `clean/expected.json` may
+declare a `policy_driven_check_ids` array; the bench runner
+counts those firings under the report's raw count but excludes
+them from the headline FP number. This is a documented
+allowlist, not a silent suppression — every entry is visible in
+`expected.json` so a reader can audit what was excluded and why.
+
 ## Retraction policy
 
 The advisory databases (npm advisories, PyPI/OSV, GitHub Advisory

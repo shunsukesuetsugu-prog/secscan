@@ -1,0 +1,22 @@
+{
+  "purpose": "false-positive measurement (config / IaC)",
+  "expected_check_ids": [],
+  "policy_driven_check_ids": [
+    "KSV-0125"
+  ],
+  "notes": [
+    "Hardened Kubernetes Deployment that follows the OWASP /",
+    "CNCF hardening guidance: non-root user (UID/GID > 10000),",
+    "dropped capabilities, no privilege escalation, read-only",
+    "root, resource limits, explicit probes, mounted service",
+    "account disabled, explicit non-default namespace.",
+    "",
+    "``policy_driven_check_ids`` lists checks whose firing depends",
+    "on an org-specific Trivy policy bundle (not a property of the",
+    "manifest itself). The bench counts these as expected noise,",
+    "NOT false positives. KSV-0125 ('Restrict container images to",
+    "trusted registries') has no default allowlist; it always fires",
+    "until the operator configures their organization's trusted",
+    "registry set."
+  ]
+}

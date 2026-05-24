@@ -1,0 +1,26 @@
+# Benchmark fixture: over-permissive Kubernetes RBAC.
+# CWE-287 / CWE-284 / CWE-285 territory — these binding
+# misconfigurations are the cluster-side counterpart of the
+# application auth flaws ZAP active scan catches.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: too-broad
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin            # ❌ KSV-0111 / similar
+subjects:
+- kind: ServiceAccount
+  name: default                  # ❌ default SA bound to cluster-admin
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wildcard-role
+  namespace: default
+rules:
+- apiGroups: ["*"]               # ❌ wildcard apiGroup
+  resources: ["*"]               # ❌ wildcard resources
+  verbs: ["*"]                   # ❌ wildcard verbs (full access)

@@ -1,0 +1,31 @@
+# Benchmark fixture: intentionally-misconfigured Kubernetes
+# Deployment. DO NOT apply to a real cluster. Used by
+# `secscan config` (Trivy) to verify auth / privilege /
+# resource-limit checks fire.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: vulnerable-app}
+  template:
+    metadata:
+      labels: {app: vulnerable-app}
+    spec:
+      # Missing: serviceAccountName + automountServiceAccountToken: false
+      # → uses the namespace default SA with token mounted
+      containers:
+      - name: app
+        image: nginx:latest        # ❌ DS-0001 latest tag
+        securityContext:
+          privileged: true          # ❌ KSV-0017 privileged container
+          runAsUser: 0              # ❌ KSV-0012 runs as root
+          allowPrivilegeEscalation: true   # ❌ KSV-0001
+          capabilities:
+            add: ["SYS_ADMIN"]      # ❌ KSV-0022 dangerous cap
+        # Missing: resources.limits / requests → KSV-0011/0015/0018
+        # Missing: readinessProbe / livenessProbe → KSV-0014/0024
+        ports:
+        - containerPort: 80

@@ -1,0 +1,55 @@
+# Borderline-clean fixture: k8s Deployment hardened to the
+# documented baseline. Trivy MUST NOT emit privileged-container /
+# root-user findings here. Used to verify FP=0.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hardened-app
+  # Explicit non-default namespace — addresses KSV-0110.
+  namespace: hardened-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: hardened-app}
+  template:
+    metadata:
+      labels: {app: hardened-app}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: hardened-app
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        # GID > 10000 addresses KSV-0021 (avoid collisions with
+        # the host /etc/group).
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        # NOTE: KSV-0125 ("Restrict container images to trusted
+        # registries") is policy-driven — Trivy has no default
+        # registry allowlist; whether docker.io/library is
+        # "trusted" depends on the operator's policy bundle. The
+        # bench treats KSV-0125 as a CONFIGURABLE finding rather
+        # than a false positive (see clean/expected.json).
+        image: docker.io/library/nginx@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          limits: {cpu: 500m, memory: 512Mi}
+          requests: {cpu: 100m, memory: 128Mi}
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8080}
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8080}
+        ports:
+        - containerPort: 8080

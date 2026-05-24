@@ -1,0 +1,28 @@
+{
+  "tool_under_test": "secscan config (Trivy)",
+  "comparison_tool": "trivy config",
+  "fixture_type": "terraform",
+  "notes": [
+    "Three intentionally-misconfigured AWS resources:",
+    "  - aws_s3_bucket without public-access block, encryption,",
+    "    logging, or versioning",
+    "  - aws_iam_policy with wildcard Action AND wildcard Resource",
+    "    (the canonical IAM auth-failure pattern, CWE-285)",
+    "  - aws_security_group open to 0.0.0.0/0 ingress + egress",
+    "Match logic: same as k8s-vulnerable — check_ids in expected",
+    "set are required to surface."
+  ],
+  "expected_check_ids": [
+    "AWS-0086",
+    "AWS-0107",
+    "AWS-0099"
+  ],
+  "expected_check_ids_notes": [
+    "AWS-0086: S3 bucket without public-access block",
+    "AWS-0107: Security group open to 0.0.0.0/0",
+    "AWS-0099: IAM policy without resource restriction",
+    "(AWS-0057 was used in the Phase 2-L design but is not emitted",
+    " by Trivy 0.70.0 on the wildcard-action pattern — that's now",
+    " surfaced as AWS-0099 / AWS-0124 instead.)"
+  ]
+}

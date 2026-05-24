@@ -1,0 +1,25 @@
+{
+  "tool_under_test": "secscan config (Trivy)",
+  "comparison_tool": "trivy config",
+  "fixture_type": "kubernetes",
+  "notes": [
+    "Two intentionally-misconfigured manifests:",
+    "  - bad-deployment.yaml: privileged container, root user, no",
+    "    securityContext, no resource limits, dangerous capabilities.",
+    "  - bad-rbac.yaml: cluster-admin granted to default ServiceAccount,",
+    "    wildcard Role rules.",
+    "Match logic: count of unique Trivy check IDs that should fire.",
+    "Each expected ID below maps to a documented Trivy check; we don't",
+    "require EVERY misconfiguration Trivy might surface — just the",
+    "core set we curated. Bonus detections boost raw_finding_count",
+    "but don't change recall."
+  ],
+  "expected_check_ids": [
+    "KSV-0017",
+    "KSV-0012",
+    "KSV-0001",
+    "KSV-0022",
+    "KSV-0011",
+    "KSV-0118"
+  ]
+}

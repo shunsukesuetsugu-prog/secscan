@@ -652,6 +652,57 @@ _TRUSTED_EXTERNAL_REPOS = frozenset(
 )
 
 
+def _bench_config(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-L: run secscan config (Trivy) against the curated
+    fixture and count expected check IDs that fired.
+
+    Recall = unique check IDs from ``expected_check_ids`` that
+    appear in secscan's output. The same fixture's ``clean``
+    sibling validates the false-positive rate.
+    """
+    _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    expected_ids = list(expected.get("expected_check_ids", []))
+    if shutil.which("docker") is None:
+        return FixtureResult(
+            scanner="config",
+            fixture_name=fixture_dir.name,
+            expected_count=len(expected_ids),
+            detected_count=0,
+            skipped_reason="docker not installed",
+        )
+    payload = _run_secscan_scan("config", fixture_dir)
+    findings = payload.get("findings", [])
+    rule_ids = {f.get("rule_id", "") for f in findings}
+    detected = sum(1 for rid in expected_ids if rid in rule_ids)
+    # Count high/medium false positives on clean fixtures (the
+    # fixture authors marked their expected_check_ids empty for
+    # clean cases, so any high/medium finding there counts as FP)
+    # EXCEPT checks listed in ``policy_driven_check_ids`` — those
+    # are firing because Trivy ships them with no default
+    # allowlist and they depend on the operator's policy bundle
+    # (e.g. KSV-0125 "trusted registries"). Counting them as FPs
+    # would mislead a reader into thinking secscan was noisy.
+    policy_driven = set(expected.get("policy_driven_check_ids", []))
+    fp = 0
+    if not expected_ids:
+        for f in findings:
+            if f.get("severity") not in ("critical", "high", "medium"):
+                continue
+            if f.get("rule_id", "") in policy_driven:
+                continue
+            fp += 1
+    return FixtureResult(
+        scanner="config",
+        fixture_name=fixture_dir.name,
+        expected_count=len(expected_ids),
+        detected_count=detected,
+        false_positive_count=fp,
+        raw_finding_count=len(findings),
+        comparison_tool="trivy config",
+    )
+
+
 def _bench_external(fixture_dir: Path) -> FixtureResult:
     """Phase 2-I dispatcher: SAST → ``_bench_external_sast``,
     secrets → ``_bench_external_secrets``."""
@@ -1119,6 +1170,15 @@ def run_all(
             if not (sub / "expected.json").exists():
                 continue
             results.append(_bench_sast(sub))
+    if "config" in scanners:
+        config_root = SAFE_FIXTURE_ROOT / "config"
+        if config_root.is_dir():
+            for sub in sorted(config_root.iterdir()):
+                if not sub.is_dir():
+                    continue
+                if not (sub / "expected.json").exists():
+                    continue
+                results.append(_bench_config(sub))
     if include_dast:
         results.extend(_bench_dast_all(mode="baseline"))
     if include_dast_active:
@@ -1261,8 +1321,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="secscan benchmark runner")
     parser.add_argument(
         "--only",
-        default="deps,secrets,sast",
-        help="comma-separated subset (deps,secrets,sast). Default: all.",
+        default="deps,secrets,sast,config",
+        help=(
+            "comma-separated subset (deps,secrets,sast,config). "
+            "Default: all four."
+        ),
     )
     parser.add_argument("--dast", action="store_true", help="include DAST baseline")
     parser.add_argument(

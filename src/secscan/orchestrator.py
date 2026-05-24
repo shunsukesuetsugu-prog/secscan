@@ -217,6 +217,19 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
         )
     if scanner_name == "secrets":
         return ScanConfig(timeout_seconds=config.secrets.timeout_seconds)
+    if scanner_name == "config":
+        # Phase 2-L: Trivy IaC / config scanner. Like DAST it
+        # runs via docker, so the import is local for the same
+        # reason (test envs without docker should not pay the
+        # import cost).
+        from .scanners.config_scanner._pinned import DEFAULT_TRIVY_IMAGE
+
+        cfg = config.config
+        image = cfg.image.strip() or DEFAULT_TRIVY_IMAGE
+        return ScanConfig(
+            timeout_seconds=cfg.timeout_seconds,
+            extra=MappingProxyType({"image": image}),
+        )
     if scanner_name == "dast":
         # Local import: the dast package is optional in test envs that
         # don't have docker. Importing at module top would force every

@@ -1,0 +1,19 @@
+{
+  "tool_under_test": "secscan config (Trivy)",
+  "comparison_tool": "trivy config",
+  "fixture_type": "dockerfile",
+  "expected_check_ids": [
+    "DS-0001",
+    "DS-0002",
+    "DS-0026"
+  ],
+  "notes": [
+    "Dockerfile uses :latest tag, runs as root, ADDs a remote URL,",
+    "and lacks HEALTHCHECK. Trivy reliably emits DS-0001 / DS-0002 /",
+    "DS-0026 — those are the three the recall check requires.",
+    "Phase 2-L gotcha: Trivy's Dockerfile parser chokes on non-ASCII",
+    "characters in comments (we lost detection when the original",
+    "fixture used '❌' emoji in comment markers). Keep this file",
+    "ASCII-only."
+  ]
+}

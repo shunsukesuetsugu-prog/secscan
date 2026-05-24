@@ -44,6 +44,7 @@ from .orchestrator import run_scanners
 from .path_safety import PathSafetyError, resolve_scan_root
 from .runner import SubprocessCommandRunner
 from .scanners.base import Scanner
+from .scanners.config_scanner import ConfigScanner
 from .scanners.dast import DastScanner
 from .scanners.deps_scanner import DepsScanner
 from .scanners.sast import SastScanner
@@ -55,6 +56,7 @@ ALL_SCANNERS: list[type[Scanner]] = [
     DepsScanner,
     SastScanner,
     DastScanner,
+    ConfigScanner,
 ]
 """Currently-implemented Scanner classes.
 
@@ -91,8 +93,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # secscan secrets / deps / sast / dast / all — share flags.
-    for cmd in ("secrets", "deps", "sast", "dast", "all"):
+    # secscan secrets / deps / sast / dast / config / all — share flags.
+    for cmd in ("secrets", "deps", "sast", "dast", "config", "all"):
         sub = subparsers.add_parser(cmd, help=f"run the {cmd} scanner")
         _add_common_scan_args(sub)
         if cmd == "all":
@@ -101,7 +103,20 @@ def _build_parser() -> argparse.ArgumentParser:
                 action="append",
                 default=[],
                 metavar="SCANNER",
-                help="scanner to skip (repeatable). Choices: secrets, deps, sast, dast.",
+                help=(
+                    "scanner to skip (repeatable). Choices: secrets, deps, "
+                    "sast, dast, config."
+                ),
+            )
+        if cmd == "config":
+            sub.add_argument(
+                "--trivy-image",
+                default=None,
+                metavar="IMAGE",
+                help=(
+                    "OCI image reference (digest-pinned) for the Trivy "
+                    "config scanner. Format: '<repo>[:tag]@sha256:<64 hex>'."
+                ),
             )
         if cmd == "sast":
             sub.add_argument(
@@ -596,6 +611,10 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
     dast_mode = getattr(args, "mode", None)
     if isinstance(dast_mode, str) and dast_mode:
         new = replace(new, dast=replace(new.dast, mode=dast_mode))
+
+    trivy_image = getattr(args, "trivy_image", None)
+    if isinstance(trivy_image, str) and trivy_image:
+        new = replace(new, config=replace(new.config, image=trivy_image))
 
     if getattr(args, "no_baseline", False):
         # Easiest way to disable baseline: point it at a path that won't
