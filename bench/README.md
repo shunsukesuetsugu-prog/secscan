@@ -10,6 +10,7 @@ audit`, `pip-audit`, `gitleaks`, `semgrep`) for parity.
 .venv/bin/python bench/run.py                # all available scanners
 .venv/bin/python bench/run.py --only deps    # subset
 .venv/bin/python bench/run.py --dast         # include DAST (requires docker + juice-shop fixture)
+.venv/bin/python bench/run.py --dast-authflow  # Phase 2-K: authenticated DAST (logs in, then re-scans with --auth-header)
 ```
 
 Outputs are committed under `bench/report.md` (human) and

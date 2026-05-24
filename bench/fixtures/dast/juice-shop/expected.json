@@ -48,6 +48,56 @@
       "min_severity": "INFO"
     }
   ],
+  "authflow": {
+    "comment": [
+      "Phase 2-K: authenticated DAST. The bench runner performs a",
+      "POST to ``login_endpoint`` with the Juice Shop tutorial admin",
+      "credentials (public, baked into upstream), extracts the JWT",
+      "from ``token_path`` in the response, and re-runs secscan dast",
+      "with ``--auth-header 'Authorization: Bearer <jwt>'``. The",
+      "credentials below are NOT real secrets — they are documented",
+      "in OWASP Juice Shop's own tutorial and ship as the demo admin",
+      "account in every release. We pin them in expected.json (not",
+      "bench/run.py) so they live next to the fixture they describe."
+    ],
+    "login_endpoint": "/rest/user/login",
+    "demo_email": "admin@juice-sh.op",
+    "demo_password": "admin123",
+    "token_path": ["authentication", "token"]
+  },
+  "expected_authflow_findings": [
+    {
+      "pluginid": "10038",
+      "name": "Content Security Policy (CSP) Header Not Set",
+      "min_severity": "MEDIUM",
+      "note": "fires in unauth baseline too — confirms auth injection didn't break the scan"
+    },
+    {
+      "pluginid": "10098",
+      "name": "Cross-Domain Misconfiguration",
+      "min_severity": "MEDIUM",
+      "note": "fires in unauth baseline too"
+    },
+    {
+      "pluginid": "10017",
+      "name": "Cross-Domain JavaScript Source File Inclusion",
+      "min_severity": "LOW",
+      "note": "fires in unauth baseline too"
+    },
+    {
+      "pluginid": "10110",
+      "name": "Dangerous JS Functions",
+      "min_severity": "LOW",
+      "note": "fires in unauth baseline too"
+    },
+    {
+      "pluginid": "10049",
+      "name": "Non-Storable Content",
+      "min_severity": "INFO",
+      "cwe_topic": "CWE-525: Information Exposure Through Browser Caching",
+      "note": "auth-only delta: ZAP marks Cache-Control: no-store / private responses returned by authenticated endpoints. Absent from the unauth baseline because ZAP never reached those endpoints without the Bearer token. This is the headline signal that auth injection worked."
+    }
+  ],
   "expected_active_findings": [
     {
       "pluginid": "10038",

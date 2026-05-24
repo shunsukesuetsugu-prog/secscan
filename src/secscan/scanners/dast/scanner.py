@@ -136,6 +136,7 @@ class DastConfig:
     config_file: str | None = None
     network_mode: str = "bridge"
     mode: str = "baseline"
+    auth_headers: tuple[str, ...] = ()
 
 
 class DastScanner(Scanner):
@@ -257,6 +258,7 @@ class DastScanner(Scanner):
                 network_mode=dast_config.network_mode,
                 report_volume=volume_name,
                 mode=dast_config.mode,
+                auth_headers=dast_config.auth_headers,
             )
             try:
                 scan_argv = build_argv(invocation)
@@ -403,6 +405,21 @@ def _resolve_dast_config(config: ScanConfig) -> DastConfig:
             f"dast.mode must be 'baseline' or 'active', got {mode!r}"
         )
 
+    auth_headers_raw = extra.get("auth_headers", ())
+    if isinstance(auth_headers_raw, (list, tuple)):
+        auth_headers: tuple[str, ...] = tuple(
+            str(h) for h in auth_headers_raw if isinstance(h, str)
+        )
+    elif isinstance(auth_headers_raw, str):
+        # A single header may arrive as a bare string from the CLI
+        # before the argparse ``append`` action wraps it; coerce
+        # for robustness.
+        auth_headers = (auth_headers_raw,)
+    else:
+        raise DastInputError(
+            "dast.auth_headers must be a list of 'Name: Value' strings"
+        )
+
     return DastConfig(
         target_url=target.strip(),
         image_ref=image_ref,
@@ -410,6 +427,7 @@ def _resolve_dast_config(config: ScanConfig) -> DastConfig:
         config_file=config_file,
         network_mode=network_mode,
         mode=mode,
+        auth_headers=auth_headers,
     )
 
 

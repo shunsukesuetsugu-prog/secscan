@@ -941,6 +941,327 @@ def _bench_dast_all(*, mode: str = "baseline") -> list[FixtureResult]:
     return results
 
 
+def _bench_dast_authflow_all() -> list[FixtureResult]:
+    """Phase 2-K: iterate fixtures that declare an ``authflow`` block
+    and run authenticated DAST against each. Fixtures without an
+    ``authflow`` key are silently skipped — they're either unauth-only
+    targets or fixtures that simply haven't been authored yet.
+    """
+    dast_root = SAFE_FIXTURE_ROOT / "dast"
+    if not dast_root.is_dir():
+        return []
+    results: list[FixtureResult] = []
+    for sub in sorted(dast_root.iterdir()):
+        if not sub.is_dir() or not (sub / "expected.json").exists():
+            continue
+        expected = _expected(sub)
+        if "authflow" not in expected or not expected.get(
+            "expected_authflow_findings"
+        ):
+            continue
+        results.append(_bench_dast_authflow(sub))
+    return results
+
+
+def _fetch_jwt(
+    *,
+    base_url: str,
+    login_endpoint: str,
+    email: str,
+    password: str,
+    token_path: list[str],
+    timeout: float = 30.0,
+) -> str | None:
+    """Phase 2-K: POST tutorial credentials to the target's login
+    endpoint and pull the JWT out of the JSON response.
+
+    Returns the bare token on success, ``None`` on any failure
+    (network, JSON shape, missing token). We intentionally do NOT
+    surface the raw response body in error paths — it could echo back
+    the password we sent. A failed login returns ``None`` and the
+    caller skips the fixture.
+
+    Hardening:
+
+    - ``urllib`` (stdlib) — no third-party requests dependency.
+    - ``base_url`` is required to be a ``http://127.0.0.1:<port>``
+      style loopback target the bench just bootstrapped, so URL
+      sanitization is straightforward (concat + parse).
+    - We never log the token; the caller hands it directly to
+      secscan dast via argv, which redacts its own logs.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if not base_url.startswith(("http://127.0.0.1:", "http://localhost:")):
+        # Defence in depth — the bench only spins up loopback
+        # targets, so a non-loopback URL means a fixture was
+        # misconfigured. Refuse rather than POST credentials anywhere
+        # else.
+        return None
+    if not login_endpoint.startswith("/"):
+        return None
+
+    url = base_url.rstrip("/") + login_endpoint
+    body = _json.dumps({"email": email, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        # Codex pin: ``urlopen`` URL is built from a loopback base
+        # plus a path that starts with ``/`` (checked above), so
+        # there is no scheme-handler surprise here.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    try:
+        payload = _json.loads(data.decode("utf-8", errors="replace"))
+    except _json.JSONDecodeError:
+        return None
+    cursor: Any = payload
+    for key in token_path:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(key)
+    if not isinstance(cursor, str) or not cursor:
+        return None
+    # The token is a JWT — three dot-separated base64url segments.
+    # Reject anything that doesn't smell like one so a misrouted
+    # response body can't be forwarded as a fake credential.
+    parts = cursor.split(".")
+    if len(parts) != 3:
+        return None
+    return cursor
+
+
+def _bench_dast_authflow(fixture_dir: Path) -> FixtureResult:
+    """Phase 2-K: authenticated DAST bench. Starts the target, logs
+    in via the documented tutorial credentials, hands the JWT to
+    secscan via ``--auth-header``, and matches the auth-aware finding
+    set declared in ``expected_authflow_findings``.
+    """
+    fixture_dir = _assert_under_fixture_root(fixture_dir)
+    expected = _expected(fixture_dir)
+    authflow = expected.get("authflow") or {}
+    expected_findings = expected.get("expected_authflow_findings", [])
+    scanner_label = "dast (authflow)"
+    fixture_name = fixture_dir.name
+    if not authflow or not expected_findings:
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="no authflow / expected_authflow_findings declared",
+        )
+    if shutil.which("docker") is None:
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=len(expected_findings),
+            detected_count=0,
+            skipped_reason="docker not installed",
+        )
+
+    pinning = expected.get("image_pinning", {})
+    zap_image = pinning.get("zap", "")
+    target_image = pinning.get("juice_shop", "")
+    if not target_image or not zap_image:
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=len(expected_findings),
+            detected_count=0,
+            skipped_reason="image_pinning missing from expected.json",
+        )
+    cc = expected.get("container_config", {})
+    container_port = int(cc.get("container_port", 3000))
+    url_path = cc.get("url_path", "/")
+
+    login_endpoint = authflow.get("login_endpoint", "")
+    email = authflow.get("demo_email", "")
+    password = authflow.get("demo_password", "")
+    token_path = authflow.get("token_path", [])
+    if (
+        not login_endpoint
+        or not email
+        or not password
+        or not isinstance(token_path, list)
+        or not token_path
+    ):
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=len(expected_findings),
+            detected_count=0,
+            skipped_reason="authflow block in expected.json is incomplete",
+        )
+
+    container_name = f"secscan-bench-{fixture_name}-auth-{_secrets.token_hex(4)}"
+    host_port = _pick_free_port()
+    container_started = False
+    try:
+        start = _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                container_name,
+                "-p",
+                f"127.0.0.1:{host_port}:{container_port}",
+                "--",
+                target_image,
+            ],
+            timeout=180,
+        )
+        if start.returncode != 0:
+            return FixtureResult(
+                scanner=scanner_label,
+                fixture_name=fixture_name,
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=(
+                    f"{fixture_name} start failed: "
+                    f"{start.stderr.decode('utf-8', errors='replace')[:120]}"
+                ),
+            )
+        container_started = True
+
+        import socket
+        import time
+
+        deadline = time.monotonic() + 120
+        ready = False
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", host_port), timeout=1):
+                    ready = True
+                    break
+            except OSError:
+                time.sleep(1)
+        if not ready:
+            return FixtureResult(
+                scanner=scanner_label,
+                fixture_name=fixture_name,
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=f"{fixture_name} did not start within 120s",
+            )
+
+        # Juice Shop boots its HTTP listener slightly before /rest is
+        # ready to accept POSTs; retry the login a few times.
+        base_url = f"http://127.0.0.1:{host_port}"
+        token: str | None = None
+        for _ in range(20):
+            token = _fetch_jwt(
+                base_url=base_url,
+                login_endpoint=login_endpoint,
+                email=email,
+                password=password,
+                token_path=token_path,
+            )
+            if token is not None:
+                break
+            time.sleep(3)
+        if token is None:
+            return FixtureResult(
+                scanner=scanner_label,
+                fixture_name=fixture_name,
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=(
+                    "login failed: could not retrieve JWT from "
+                    f"{login_endpoint} within timeout (target may have "
+                    "rolled forward and changed the login response shape)"
+                ),
+            )
+
+        # The token value contains no spaces (JWTs are base64url +
+        # dots) but goes into ``--auth-header`` whose value contains
+        # exactly one space (``Bearer <token>``). The DAST validator
+        # rejects CR/LF, single quotes, and non-printables; a healthy
+        # JWT passes cleanly.
+        auth_header_value = f"Authorization: Bearer {token}"
+        # Sanity check: refuse to pass anything that doesn't look
+        # like a header value. Defence in depth against an upstream
+        # change that returns a malformed token (e.g. embedded
+        # whitespace from a misshapen JSON parser).
+        for ch in auth_header_value:
+            if ch in ("\r", "\n", "'") or (not ch.isprintable() and ch != " "):
+                return FixtureResult(
+                    scanner=scanner_label,
+                    fixture_name=fixture_name,
+                    expected_count=len(expected_findings),
+                    detected_count=0,
+                    skipped_reason=(
+                        "token contained a disallowed character; "
+                        "refusing to forward to secscan"
+                    ),
+                )
+
+        argv = [
+            "secscan",
+            "dast",
+            "--target",
+            f"http://host.docker.internal:{host_port}{url_path}",
+            "--zap-image",
+            zap_image,
+            "--mode",
+            "baseline",
+            "--auth-header",
+            auth_header_value,
+            "--format",
+            "json",
+            "--fail-on",
+            "none",
+            "--no-color",
+            "--path",
+            str(fixture_dir),
+        ]
+        result = _run(argv, cwd=REPO_ROOT, timeout=1800)
+        if not result.stdout:
+            return FixtureResult(
+                scanner=scanner_label,
+                fixture_name=fixture_name,
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=(
+                    "secscan dast returned no stdout: "
+                    + result.stderr.decode("utf-8", errors="replace")[:160]
+                ),
+            )
+        payload = json.loads(result.stdout.decode("utf-8"))
+        findings = payload.get("findings", [])
+        rule_ids = {f.get("rule_id", "") for f in findings}
+        detected = sum(
+            1 for entry in expected_findings if entry["pluginid"] in rule_ids
+        )
+        return FixtureResult(
+            scanner=scanner_label,
+            fixture_name=fixture_name,
+            expected_count=len(expected_findings),
+            detected_count=detected,
+            raw_finding_count=len(findings),
+            comparison_tool="zap-baseline + auth header",
+        )
+    finally:
+        if container_started:
+            _run(
+                ["docker", "stop", "--timeout", "5", container_name], timeout=30
+            )
+
+
 def _bench_dast(fixture_dir: Path, *, mode: str = "baseline") -> FixtureResult:
     if not fixture_dir.exists() or not (fixture_dir / "expected.json").exists():
         return FixtureResult(
@@ -1145,6 +1466,7 @@ def run_all(
     scanners: set[str],
     include_dast: bool,
     include_dast_active: bool = False,
+    include_dast_authflow: bool = False,
     include_external: bool,
 ) -> list[FixtureResult]:
     results: list[FixtureResult] = []
@@ -1183,6 +1505,8 @@ def run_all(
         results.extend(_bench_dast_all(mode="baseline"))
     if include_dast_active:
         results.extend(_bench_dast_all(mode="active"))
+    if include_dast_authflow:
+        results.extend(_bench_dast_authflow_all())
     if include_external:
         external_root = SAFE_FIXTURE_ROOT / "external"
         if external_root.is_dir():
@@ -1340,6 +1664,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--dast-authflow",
+        action="store_true",
+        dest="dast_authflow",
+        help=(
+            "Phase 2-K: include authenticated DAST. Logs into each "
+            "fixture using the tutorial credentials declared in its "
+            "``authflow`` block, extracts the JWT, and re-runs the "
+            "baseline scan with ``--auth-header``. Surfaces alerts "
+            "from behind-the-login pages that the unauth baseline "
+            "never reaches."
+        ),
+    )
+    parser.add_argument(
         "--external",
         action="store_true",
         help=(
@@ -1364,6 +1701,7 @@ def main(argv: list[str] | None = None) -> int:
             scanners=scanners,
             include_dast=args.dast,
             include_dast_active=args.dast_active,
+            include_dast_authflow=args.dast_authflow,
             include_external=args.external,
         )
     except BenchError as exc:

@@ -182,6 +182,21 @@ def _build_parser() -> argparse.ArgumentParser:
                     "production targets."
                 ),
             )
+            sub.add_argument(
+                "--auth-header",
+                action="append",
+                default=None,
+                metavar='"Name: Value"',
+                dest="auth_headers",
+                help=(
+                    "HTTP header to inject into every ZAP request "
+                    "(repeatable). Use for token-authenticated DAST: "
+                    "e.g. --auth-header 'Authorization: Bearer <jwt>'. "
+                    "ZAP's replacer config will add the header on all "
+                    "outgoing requests so probes reach auth-gated "
+                    "endpoints."
+                ),
+            )
 
     # secscan baseline …
     baseline_parser = subparsers.add_parser(
@@ -615,6 +630,13 @@ def _apply_cli_overrides(config: ProjectConfig, args: argparse.Namespace) -> Pro
     trivy_image = getattr(args, "trivy_image", None)
     if isinstance(trivy_image, str) and trivy_image:
         new = replace(new, config=replace(new.config, image=trivy_image))
+
+    auth_headers = getattr(args, "auth_headers", None)
+    if auth_headers:
+        new = replace(
+            new,
+            dast=replace(new.dast, auth_headers=tuple(auth_headers)),
+        )
 
     if getattr(args, "no_baseline", False):
         # Easiest way to disable baseline: point it at a path that won't

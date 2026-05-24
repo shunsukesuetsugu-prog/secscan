@@ -275,6 +275,7 @@ Required CLI flags / config:
 | `--ajax-spider`       | `dast.ajax_spider`      | Enable ZAP's AJAX spider (slower; JS-heavy targets). |
 | `--zap-config-file`   | `dast.config_file`      | ZAP context file path **inside the container**.      |
 | `--zap-network`       | `dast.network_mode`     | `bridge` (default) or `host`.                        |
+| `--auth-header`       | `dast.auth_headers`     | HTTP header injected into every ZAP request (Phase 2-K, repeatable). |
 
 Hard requirements baked into the implementation:
 
@@ -295,6 +296,48 @@ Hard requirements baked into the implementation:
   carry a coarse `(pluginid, path)` alias, so a single
   `baseline accept` suppresses both the `param`-bearing and
   `param`-less variants of the same advisory.
+
+### Authenticated DAST (Phase 2-K)
+
+Many real-world bugs only surface behind a login. `--auth-header`
+forwards a static HTTP header — typically a JWT bearer token your
+test harness obtained out of band — into **every** request ZAP sends:
+
+```sh
+# 1. Obtain a token from your auth flow (curl / your test rig).
+TOKEN=$(curl -s -X POST https://staging.example.com/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"qa@example.com","password":"…"}' | jq -r .token)
+
+# 2. Hand it to secscan dast.
+secscan dast \
+  --target https://staging.example.com/ \
+  --zap-image zaproxy/zap-stable@sha256:<verified-digest> \
+  --auth-header "Authorization: Bearer $TOKEN"
+```
+
+`--auth-header` is repeatable — pass it multiple times for multi-header
+auth schemes (e.g. `Authorization: Bearer …` + `X-Tenant: acme`).
+Internally each header becomes one entry in ZAP's
+[`replacer.full_list`](https://www.zaproxy.org/docs/desktop/addons/replacer/)
+config; secscan single-quotes every `key=value` pair so values
+containing spaces (every Bearer token) survive ZAP's whitespace
+tokenisation.
+
+Header value rules (enforced by the validator, all rejections
+produce a clear `DastInputError` at argv-build time):
+
+- **Must contain `:`** between name and value.
+- **Name** must be a [RFC 7230](https://www.rfc-editor.org/rfc/rfc7230#section-3.2.6)
+  token — `=`, `,`, `(` and other ZAP `-z` syntax sigils are
+  rejected so the value cannot break out of the replacer key/value
+  position.
+- **Value** must be non-empty, printable, and free of CR / LF
+  (classic header smuggling defence) and single quotes (we use
+  single quotes to wrap the `key=value` pair, so an embedded `'`
+  would close the wrap early).
+- **`--auth-header` values flow through secscan's redactor in
+  logs**; the raw token is never written to stdout or the report.
 
 ### ZAP image digest rotation
 
@@ -451,7 +494,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-I   | 外部 benchmark (NodeGoat / PyGoat / WebGoat / gitleaks corpus) | done (v0.10.0) |
 | 2-J   | ZAP active scan opt-in (`--mode=active` + `--dast-active`) | done (v0.11.0)    |
 | 2-L   | Trivy config scan (IaC/k8s/Docker/Helm)             | done (v0.12.0)        |
-| 2-K   | ZAP auth-flow context (login → session → 保護リソース) | planned             |
+| 2-K   | ZAP auth-flow via HTTP header injection (`--auth-header`)  | done (v0.13.0) |
 
 ## Development
 

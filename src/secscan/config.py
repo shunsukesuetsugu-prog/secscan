@@ -178,6 +178,16 @@ class DastConfig:
     targets; it will issue malformed requests that can degrade
     service or create user-visible test rows."""
 
+    auth_headers: tuple[str, ...] = ()
+    """Phase 2-K: HTTP headers to inject into every ZAP request.
+
+    Each entry is ``"Name: Value"`` (e.g.
+    ``"Authorization: Bearer <jwt>"``). The DastScanner forwards
+    them to ZAP's ``replacer`` config so every probe carries the
+    header — required to reach auth-gated endpoints during DAST.
+    Validated via ``dast.zap.validate_auth_header`` before
+    reaching the argv."""
+
 
 @dataclass(frozen=True)
 class BaselineConfig:
@@ -516,6 +526,8 @@ def _parse_dast(table: dict[str, object]) -> DastConfig:
             "config_file",
             "network_mode",
             "timeout_seconds",
+            "mode",
+            "auth_headers",
         },
         "dast",
     )
@@ -531,6 +543,9 @@ def _parse_dast(table: dict[str, object]) -> DastConfig:
         raise ConfigError(
             f"dast.mode: must be 'baseline' or 'active' (got {mode!r})"
         )
+    auth_headers = _require_str_list(
+        table.get("auth_headers", []), "dast.auth_headers"
+    )
     return DastConfig(
         target=_require_str(table.get("target", ""), "dast.target"),
         image=_require_str(table.get("image", ""), "dast.image"),
@@ -547,6 +562,7 @@ def _parse_dast(table: dict[str, object]) -> DastConfig:
             minimum=1,
         ),
         mode=mode,
+        auth_headers=auth_headers,
     )
 
 

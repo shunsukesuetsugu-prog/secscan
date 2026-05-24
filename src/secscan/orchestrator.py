@@ -248,6 +248,7 @@ def _scan_config_for(scanner_name: str, config: ProjectConfig) -> ScanConfig:
                     "config_file": dast.config_file or None,
                     "network_mode": dast.network_mode,
                     "mode": dast.mode,
+                    "auth_headers": dast.auth_headers,
                 }
             ),
         )

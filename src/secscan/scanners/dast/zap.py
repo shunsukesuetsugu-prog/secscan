@@ -297,6 +297,27 @@ class ZapInvocation:
     ``"acttive"`` doesn't silently fall back to baseline.
     """
 
+    auth_headers: tuple[str, ...] = ()
+    """Phase 2-K: HTTP headers to inject into every ZAP request.
+
+    Each entry is a ``Name: Value`` pair (e.g.
+    ``"Authorization: Bearer <jwt>"``). secscan converts them into
+    ZAP's ``replacer`` config via ``-z -config replacer.full_list``
+    entries so every probe ZAP sends carries the header.
+
+    The motivating use case is JWT-authenticated DAST: the
+    caller (typically the bench's ``--dast-authflow`` path)
+    performs a login HTTP request against the target, extracts
+    the bearer token, and passes it here. With the header
+    injected, ZAP reaches protected endpoints (e.g. ``/api/Users``
+    on Juice Shop) and the active-mode payload probes can attempt
+    auth-after exploits like IDOR (CWE-639), authenticated CSRF
+    (CWE-352), and post-login XSS (CWE-79).
+
+    Each header is validated through ``validate_auth_header``
+    before it can flow into the argv.
+    """
+
 
 # Container-side mount point. ZAP's image uses ``/zap/wrk`` as the
 # documented working directory for input contexts and output reports
@@ -336,6 +357,85 @@ def validate_docker_object_name(name: str, *, kind: str) -> str:
             "object-name charset ([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})"
         )
     return name
+
+
+# HTTP header name grammar (RFC 7230): visible ASCII excluding
+# separators and CTLs. We're conservative and allow only the
+# "token" subset; that covers every header any auth scheme uses.
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._\-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class _ParsedAuthHeader:
+    name: str
+    value: str
+
+
+def validate_auth_header(raw: str) -> _ParsedAuthHeader:
+    """Parse and constrain a ``Name: Value`` header for injection.
+
+    Phase 2-K: each ``--auth-header`` argument flows from CLI →
+    ZapInvocation → ``-z -config replacer.full_list(N)...`` in
+    the docker argv. The string lands inside ZAP's config
+    expressions, so anything that could break out of the
+    expected key/value position must be rejected.
+
+    Rules:
+    - non-empty, separable by the first ``:`` (a colon is
+      mandatory; the name precedes, the value follows).
+    - name matches the conservative "token" subset
+      (``^[A-Za-z][A-Za-z0-9._-]{0,127}$``). This rules out
+      whitespace, control characters, and ZAP's config syntax
+      sigils (``,``, ``=``, parentheses).
+    - value: free-form but no control / non-printable characters
+      and no embedded newlines / CR.
+    - **never** an empty value (use ``--no-auth-header`` to clear
+      a previously-set header rather than passing an empty
+      string).
+    """
+    if not isinstance(raw, str):
+        raise DastInputError("--auth-header must be a string")
+    text = raw.strip()
+    if ":" not in text:
+        raise DastInputError(
+            "--auth-header must be of the form 'Name: Value' "
+            "(missing ':')"
+        )
+    name, _, value = text.partition(":")
+    name = name.strip()
+    value = value.lstrip()
+    if not _HEADER_NAME_RE.match(name):
+        raise DastInputError(
+            f"--auth-header name {name!r} contains characters outside "
+            "the safe HTTP token charset [A-Za-z][A-Za-z0-9._-]{0,127}"
+        )
+    if not value:
+        raise DastInputError(
+            f"--auth-header {name!r} has an empty value; "
+            "pass a non-empty token"
+        )
+    for ch in value:
+        if ch in ("\r", "\n"):
+            raise DastInputError(
+                f"--auth-header {name!r} value contains CR/LF — "
+                "header smuggling defence"
+            )
+        if ch == "'":
+            # We wrap the value in single quotes when forwarding
+            # to ZAP's ``-z`` config (the only way to preserve
+            # spaces in Bearer tokens). An embedded single quote
+            # would close the wrap early and let the rest of the
+            # value parse as additional config tokens — reject.
+            raise DastInputError(
+                f"--auth-header {name!r} value contains a single quote — "
+                "not currently supported (ZAP -z config quoting limitation)"
+            )
+        if not ch.isprintable() and ch != " " and ch != "\t":
+            raise DastInputError(
+                f"--auth-header {name!r} value contains a non-printable "
+                "character"
+            )
+    return _ParsedAuthHeader(name=name, value=value)
 
 
 def build_argv(invocation: ZapInvocation) -> list[str]:
@@ -432,6 +532,41 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
         # an additional bind mount for it — that's the operator's
         # responsibility outside the report tempdir).
         argv.extend(["-n", invocation.config_file])
+
+    # Phase 2-K: HTTP header injection via ZAP's ``-z`` config
+    # forwarding. Each ``--auth-header`` becomes a ``replacer``
+    # entry — ZAP rewrites every outgoing request to carry the
+    # header.
+    #
+    # ZAP's ``-z`` value is a SINGLE string that ZAP splits
+    # internally on whitespace. That tokenization breaks for
+    # values containing spaces (the standard "Bearer <jwt>"
+    # shape!), so we wrap each ``key=value`` pair in single
+    # quotes — ZAP's argument parser respects quoting around
+    # config tokens. The validator already rejects single
+    # quotes inside the header value, so the closing quote is
+    # unambiguous.
+    if invocation.auth_headers:
+        z_tokens: list[str] = []
+        for index, raw in enumerate(invocation.auth_headers):
+            parsed = validate_auth_header(raw)
+            z_tokens.extend(
+                [
+                    "-config",
+                    f"'replacer.full_list({index}).description=secscan-auth-{index}'",
+                    "-config",
+                    f"'replacer.full_list({index}).enabled=true'",
+                    "-config",
+                    f"'replacer.full_list({index}).matchtype=REQ_HEADER'",
+                    "-config",
+                    f"'replacer.full_list({index}).matchstr={parsed.name}'",
+                    "-config",
+                    f"'replacer.full_list({index}).regex=false'",
+                    "-config",
+                    f"'replacer.full_list({index}).replacement={parsed.value}'",
+                ]
+            )
+        argv.extend(["-z", " ".join(z_tokens)])
 
     return argv
 
