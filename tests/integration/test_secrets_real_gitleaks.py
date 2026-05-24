@@ -27,12 +27,16 @@ def _skip_if_no_gitleaks() -> None:
 
 
 def test_real_gitleaks_finds_aws_key_and_redacts(tmp_path: Path) -> None:
-    # Plant an obvious AWS-shaped fake key in a file. gitleaks should detect
-    # and emit a redacted finding.
+    # Plant a synthetic AWS-shaped fake key. We deliberately avoid the
+    # `AKIAIOSFODNN7EXAMPLE` / `...EXAMPLEKEY` AWS-docs sentinel pair:
+    # gitleaks 8.30+ ships an allowlist that drops matches containing
+    # `EXAMPLE`/`SAMPLE` tokens, so the canonical docs key produces zero
+    # findings. The values below are random-looking, never-issued strings
+    # used only for this test.
     leaky = tmp_path / "config.py"
     leaky.write_text(
-        "AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'\n"
-        "AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'\n",
+        "aws_access_key_id = AKIA2E0A8F3B244C9986\n"
+        "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYsecreT123abcd\n",
         encoding="utf-8",
     )
 
@@ -51,5 +55,6 @@ def test_real_gitleaks_finds_aws_key_and_redacts(tmp_path: Path) -> None:
     blob = " ".join(
         [f.message + " " + (f.location.file or "") for f in outcome.findings]
     )
-    assert "AKIAIOSFODNN7EXAMPLE" not in blob
+    assert "AKIA2E0A8F3B244C9986" not in blob
     assert "wJalrXUtnFEMI" not in blob
+    assert "secreT123abcd" not in blob
