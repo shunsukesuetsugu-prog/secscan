@@ -102,7 +102,10 @@ def build_argv(invocation: SyftInvocation) -> list[str]:
     ]
 
     if isinstance(target, DirectoryTarget):
-        docker_args.extend(["-v", f"{target.path}:/scan:ro"])
+        from ...portability import to_docker_host_path
+        docker_args.extend(
+            ["-v", f"{to_docker_host_path(target.path)}:/scan:ro"]
+        )
         syft_target = "dir:/scan"
     elif isinstance(target, ImageTarget):
         syft_target = f"registry:{target.ref}"

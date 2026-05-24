@@ -194,9 +194,16 @@ def build_argv(invocation: SchemathesisInvocation) -> list[str]:
     if isinstance(schema, SchemaFile):
         # Bind-mount the file at a fixed in-container path so the
         # schema LOCATION argument is a stable literal we control.
+        from ...portability import to_docker_host_path
+
         suffix = schema.path.suffix.lower() or ".json"
         in_container = f"{_SCHEMA_MOUNT_DIR}/openapi{suffix}"
-        docker_args.extend(["-v", f"{schema.path}:{in_container}:ro"])
+        docker_args.extend(
+            [
+                "-v",
+                f"{to_docker_host_path(schema.path)}:{in_container}:ro",
+            ]
+        )
         schema_location = in_container
     elif isinstance(schema, SchemaUrl):
         schema_location = schema.url

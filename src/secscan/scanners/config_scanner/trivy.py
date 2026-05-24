@@ -110,31 +110,28 @@ def validate_scan_path(scan_root: Path) -> Path:
 
     - absolute (so docker's bind-mount parser has no ambiguity);
     - existing (``.is_dir()``);
-    - free of ``:`` in its string form (otherwise docker would
-      treat the second colon as a mount-option separator);
     - not starting with ``-`` (defence in depth — caller cannot
       smuggle a docker flag);
-    - free of control / non-printable characters (Codex Phase 2-L
-      diff review: an attacker-controlled scan_root with embedded
-      newlines or NULs could confuse docker's argv parser on
-      certain platforms — reject outright).
+    - safe to use as a docker bind-mount source on the current OS
+      (Phase 2-W: Windows drive-colon and backslash are tolerated
+      because ``to_docker_host_path`` converts the path to the
+      Unix-style ``/c/...`` form before it reaches argv).
     """
+    from ...portability import path_charset_check
+
     if not isinstance(scan_root, Path):
         raise ConfigInputError("scan_root must be a Path")
     resolved = scan_root.resolve()
     if not resolved.is_dir():
         raise ConfigInputError(f"scan_root does not exist or is not a directory: {resolved}")
     s = str(resolved)
-    if ":" in s:
-        raise ConfigInputError(
-            "scan_root must not contain ':' (docker would interpret "
-            "it as a bind-mount option separator)"
-        )
     if s.startswith("-"):
         raise ConfigInputError("scan_root must not start with '-'")
-    if any(not ch.isprintable() for ch in s):
+    if not path_charset_check(s):
         raise ConfigInputError(
-            "scan_root must not contain control or non-printable characters"
+            "scan_root contains a character that cannot be safely used "
+            "as a docker bind-mount source (NUL, CR/LF, tab, or other "
+            "control char)"
         )
     return resolved
 
@@ -177,6 +174,8 @@ def build_argv(invocation: TrivyInvocation) -> list[str]:
     ``--network=none`` is safe for Trivy config scans: the policy
     bundles ship inside the image, no outbound calls needed.
     """
+    from ...portability import to_docker_host_path
+
     image_ref = validate_image_ref(invocation.image_ref)
     scan_root = validate_scan_path(invocation.scan_root)
     return [
@@ -187,7 +186,7 @@ def build_argv(invocation: TrivyInvocation) -> list[str]:
         "--security-opt=no-new-privileges",
         "--network=none",
         "-v",
-        f"{scan_root}:{_TRIVY_WORK_DIR}:ro",
+        f"{to_docker_host_path(scan_root)}:{_TRIVY_WORK_DIR}:ro",
         "--",
         image_ref,
         "config",

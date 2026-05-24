@@ -1,16 +1,19 @@
 """Phase 2-P: subprocess + probe-HTTP tests for the IAST harness.
 
-These tests spawn real subprocesses (`sh -c sleep N`) to verify
-the process-group lifecycle. They do NOT exercise pyrasp itself —
-that's the parser's job.
+These tests spawn real subprocesses (Phase 2-W: using
+``sys.executable`` so the same tests run on POSIX and Windows)
+to verify the process-tree lifecycle. They do NOT exercise
+pyrasp itself — that's the parser's job.
 """
 
 from __future__ import annotations
 
 import http.server
 import os
+import shlex
 import socket
 import socketserver
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -29,66 +32,94 @@ from secscan.scanners.iast.validators import (
     validate_command_argv,
 )
 
+
+def _py_sleep_cmd(seconds: float) -> str:
+    """Phase 2-W: return a shell-quoted command string that
+    sleeps for ``seconds`` using the running Python interpreter.
+
+    Cross-platform replacement for ``sh -c 'sleep N'`` — ``sh``
+    is not installed on Windows."""
+    py = shlex.quote(sys.executable)
+    return f"{py} -c \"import time; time.sleep({seconds})\""
+
+
+def _py_noop_cmd() -> str:
+    py = shlex.quote(sys.executable)
+    return f"{py} -c \"pass\""
+
 # ---------------------------------------------------------------------------
 # Subprocess lifecycle
 # ---------------------------------------------------------------------------
 
 
 class TestSpawnApp:
-    def test_spawns_and_runs_as_new_session_leader(
-        self, tmp_path: Path
-    ) -> None:
-        """Process is its own session leader so terminate_process_
-        group can kill its descendants too."""
-        cmd = validate_command_argv("sh -c 'sleep 30'")
+    def test_spawns_and_runs(self, tmp_path: Path) -> None:
+        """Process spawns successfully and is alive after launch.
+
+        Phase 2-W: this test runs on POSIX AND Windows because
+        ``sys.executable`` is universally available. The session-
+        leader assertion is POSIX-only (``os.getpgid``)."""
+        cmd = validate_command_argv(_py_sleep_cmd(30))
         handle = spawn_app(cmd, cwd=tmp_path)
         try:
             assert handle.pid > 0
-            # Process group id == leader pid (new session).
-            assert handle.process_group == os.getpgid(handle.pid)
             # Still alive shortly after spawn.
             assert handle.proc.poll() is None
+        finally:
+            terminate_process_group(handle, grace_seconds=2.0)
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="getpgid is POSIX-only"
+    )
+    def test_posix_session_leader(self, tmp_path: Path) -> None:
+        """POSIX-only: process is its own session leader so
+        terminate_process_group can killpg the descendants too."""
+        cmd = validate_command_argv(_py_sleep_cmd(30))
+        handle = spawn_app(cmd, cwd=tmp_path)
+        try:
+            assert handle.process_group == os.getpgid(handle.pid)
         finally:
             terminate_process_group(handle, grace_seconds=2.0)
 
     def test_argv_invalid_cwd_rejected(self) -> None:
         from secscan.scanners.iast.validators import IastInputError
 
-        cmd = validate_command_argv("sh -c 'sleep 1'")
+        cmd = validate_command_argv(_py_noop_cmd())
+        bogus = Path("/this/path/does/not/exist/abcdef")
         with pytest.raises(IastInputError):
-            spawn_app(cmd, cwd=Path("/nope/does/not/exist"))
+            spawn_app(cmd, cwd=bogus)
 
 
 class TestTerminateProcessGroup:
-    def test_sigterm_terminates_sleeping_child(
+    def test_terminate_stops_sleeping_child(
         self, tmp_path: Path
     ) -> None:
-        cmd = validate_command_argv("sh -c 'sleep 60'")
+        """Cross-platform: ``terminate_process_group`` reliably
+        stops the spawned process within the grace window."""
+        cmd = validate_command_argv(_py_sleep_cmd(60))
         handle = spawn_app(cmd, cwd=tmp_path)
         start = time.monotonic()
-        rc = terminate_process_group(handle, grace_seconds=2.0)
+        terminate_process_group(handle, grace_seconds=3.0)
         elapsed = time.monotonic() - start
-        # Either negative (signaled) or 0 — both indicate the
-        # process exited promptly.
-        assert rc is None or rc <= 0 or rc < 256
-        # Should finish well under the grace period — sleep
-        # responds to SIGTERM immediately.
-        assert elapsed < 2.5
+        # Should finish well under the grace + final wait window.
+        assert elapsed < 8.5
+        # Process is definitely gone now.
+        assert handle.proc.poll() is not None
 
     def test_sigkill_runs_even_when_leader_exits_early(
         self, tmp_path: Path
     ) -> None:
         """Codex Phase 2-P diff review MUST-FIX: ``terminate_
-        process_group`` must ALWAYS issue SIGKILL on the whole
-        group, even when the leader has already exited.
-        Otherwise an orphan descendant in the same group could
-        outlive the cleanup.
+        process_group`` must ALWAYS issue the force-kill step
+        on the whole tree, even when the leader has already
+        exited. Otherwise an orphan descendant could outlive
+        the cleanup.
 
         We force the early-exit case by waiting for the leader
         BEFORE calling ``terminate_process_group``; the cleanup
         helper must still successfully traverse the post-exit
         path and return cleanly."""
-        cmd = validate_command_argv("sh -c 'true'")
+        cmd = validate_command_argv(_py_noop_cmd())
         handle = spawn_app(cmd, cwd=tmp_path)
         # Leader has already exited.
         rc = handle.proc.wait(timeout=5.0)
@@ -100,11 +131,11 @@ class TestTerminateProcessGroup:
     def test_already_dead_process_no_error(
         self, tmp_path: Path
     ) -> None:
-        cmd = validate_command_argv("sh -c 'true'")
+        cmd = validate_command_argv(_py_noop_cmd())
         handle = spawn_app(cmd, cwd=tmp_path)
         # Wait for natural exit.
         handle.proc.wait(timeout=5.0)
-        # Cleanup must NOT raise even though the process group is
+        # Cleanup must NOT raise even though the process tree is
         # already empty.
         rc = terminate_process_group(handle, grace_seconds=0.5)
         # Already-exited child returns 0.

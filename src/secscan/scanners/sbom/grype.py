@@ -138,21 +138,23 @@ def build_argv(invocation: GrypeInvocation) -> list[str]:
     else:
         # SBOM file mount. The path here flows from the validator
         # chain in ``validators.py`` so it's already charset-clean.
-        # We still strip a defensive last check: leading dash, no
-        # spaces, no colons.
+        # On Windows we convert via to_docker_host_path so the
+        # drive-colon doesn't collide with the -v separator.
+        from ...portability import path_charset_check, to_docker_host_path
         host_path = invocation.sbom_file_path or ""
-        if (
-            not host_path
-            or host_path.startswith("-")
-            or " " in host_path
-            or ":" in host_path
-            or "\n" in host_path
-        ):
+        if not host_path or host_path.startswith("-"):
             raise SbomInputError(
                 f"sbom_file_path {host_path!r} is not safe for a docker "
                 "bind mount"
             )
-        docker_args.extend(["-v", f"{host_path}:{SBOM_FILE_MOUNT}:ro"])
+        if not path_charset_check(host_path):
+            raise SbomInputError(
+                f"sbom_file_path {host_path!r} contains a forbidden "
+                "character for a docker bind mount"
+            )
+        docker_args.extend(
+            ["-v", f"{to_docker_host_path(host_path)}:{SBOM_FILE_MOUNT}:ro"]
+        )
         sbom_arg = f"sbom:{SBOM_FILE_MOUNT}"
 
     if invocation.cache_volume:

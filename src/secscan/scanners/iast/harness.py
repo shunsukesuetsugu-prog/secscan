@@ -1,13 +1,23 @@
 """Subprocess lifecycle + probe traffic for the IAST harness.
 
-Phase 2-P (Codex MUST-FIX coverage):
+Phase 2-P (Codex MUST-FIX coverage) + Phase 2-W (cross-platform):
 
-- ``Popen(... shell=False, stdout=DEVNULL, stderr=DEVNULL,
-  start_new_session=True)`` — no pipe-deadlock, no orphan
-  subprocesses when the parent process group is killed.
-- ``terminate_process_group`` sends SIGTERM to the WHOLE
-  session (Flask reloader etc. live in the same session) and
-  escalates to SIGKILL after the grace period.
+- ``Popen(... shell=False, stdout=DEVNULL, stderr=DEVNULL)`` — no
+  pipe-deadlock. The POSIX branch adds ``start_new_session=True``
+  to make the child a session leader so ``killpg`` reaches the
+  whole tree (Flask reloader children etc.). The Windows branch
+  adds ``CREATE_NEW_PROCESS_GROUP`` and relies on
+  ``psutil.children(recursive=True)`` to enumerate descendants.
+- ``terminate_process_group`` is graceful on POSIX (SIGTERM →
+  grace → SIGKILL). On Windows ``psutil.terminate()`` maps to
+  ``TerminateProcess`` which is **NOT graceful** — it's the
+  Windows equivalent of SIGKILL. We document this asymmetry
+  rather than pretend Windows has SIGTERM-equivalence.
+- Codex Phase 2-W MUST-FIX #3 carry-over: Windows containment
+  via ``CREATE_NEW_PROCESS_GROUP + psutil.children`` is
+  **best-effort**, NOT a Job-Object-grade hard boundary.
+  Detached descendants and parent-exits-first races can leak
+  on Windows; this is documented and accepted at v0.18.0.
 - Probe HTTP uses a custom ``urllib`` opener that DROPS the
   ``HTTPRedirectHandler`` and ``ProxyHandler`` — Codex
   MUST-FIX #4: no 3xx follow, no proxy env-var leak.
@@ -29,6 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+import psutil
+
+from ...portability import IS_WINDOWS
 from .probes import Probe
 from .validators import (
     CommandSpec,
@@ -46,12 +59,20 @@ class ProcessHandle:
     Only the harness wires up this dataclass; tests construct it
     directly with mock ``proc`` objects to exercise the lifecycle
     helpers in isolation.
+
+    ``process_group`` is the POSIX process group id (== leader
+    pid when ``start_new_session=True``) on Linux/macOS, and is
+    set to ``proc.pid`` on Windows where the concept doesn't
+    apply directly. ``psutil_proc`` is the snapshot captured at
+    spawn time — using it (instead of looking up by pid later)
+    avoids PID-reuse races during cleanup.
     """
 
     proc: subprocess.Popen[bytes]
     argv: tuple[str, ...]
     pid: int
     process_group: int
+    psutil_proc: psutil.Process | None
 
 
 # ---------------------------------------------------------------------------
@@ -65,51 +86,127 @@ def spawn_app(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
 ) -> ProcessHandle:
-    """Spawn the operator-supplied app as a process-group leader.
+    """Spawn the operator-supplied app under cross-platform process
+    grouping.
 
-    Codex Phase 2-P design review MUST-FIX #2 + #3:
+    POSIX (Linux/macOS):
+        ``start_new_session=True`` puts the child in a fresh
+        session + process group. ``os.killpg`` reaches every
+        descendant — Flask's reloader children, gunicorn workers,
+        etc.
 
-    - ``shell=False`` + argv list (validator-supplied).
-    - ``stdout=DEVNULL, stderr=DEVNULL`` so a chatty app cannot
-      deadlock by filling the OS pipe buffer.
-    - ``start_new_session=True`` puts the child in a fresh
-      session AND process group, so we can SIGTERM the entire
-      tree (Flask's reloader and gunicorn workers are children
-      of the launched process; without ``killpg`` they'd
-      survive).
+    Windows:
+        ``creationflags=CREATE_NEW_PROCESS_GROUP`` lets us send
+        ``CTRL_BREAK_EVENT`` to a process group, but Python's
+        ``psutil`` walks the parent-child tree more reliably,
+        so the cleanup path uses that. The Windows "process
+        group" returned here is a sentinel (= leader pid) for
+        API uniformity with POSIX.
     """
     if cwd is not None and not cwd.is_dir():
         raise IastInputError(f"cwd {cwd} does not exist or is not a dir")
-    # mypy: subprocess.Popen takes Sequence[str] which our tuple satisfies.
-    proc = subprocess.Popen(
-        list(command.argv),
-        shell=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        cwd=str(cwd) if cwd is not None else None,
-        start_new_session=True,
-    )
-    pgid = os.getpgid(proc.pid)
+    # mypy: Popen's kwargs are not portable as a dict[str, object]
+    # because each kw has its own type. We branch the call.
+    proc: subprocess.Popen[bytes]
+    if IS_WINDOWS:
+        # CREATE_NEW_PROCESS_GROUP: lets CTRL_BREAK_EVENT target
+        # the new group instead of inheriting the parent's.
+        # ``getattr`` because mypy on POSIX doesn't see this
+        # Windows-only attribute statically.
+        #
+        # Codex Phase 2-W diff review MUST-FIX: if this attribute
+        # is unexpectedly missing (very old Python, embedded
+        # build, etc.), refuse to silently fall back to ``0`` —
+        # that would let the child inherit the parent's process
+        # group and defeat the isolation contract documented in
+        # the harness module docstring.
+        create_new_group = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", None
+        )
+        if create_new_group is None:
+            raise RuntimeError(
+                "subprocess.CREATE_NEW_PROCESS_GROUP is not available "
+                "on this Python build. The IAST harness cannot create "
+                "an isolated process group on Windows without it. "
+                "Upgrade Python or run IAST on a POSIX host."
+            )
+        proc = subprocess.Popen(
+            list(command.argv),
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=str(cwd) if cwd is not None else None,
+            creationflags=create_new_group,
+        )
+    else:
+        proc = subprocess.Popen(
+            list(command.argv),
+            shell=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=str(cwd) if cwd is not None else None,
+            start_new_session=True,
+        )
+    # Capture the psutil snapshot AT SPAWN TIME — using this
+    # later avoids PID-reuse races (Codex Phase 2-W diff review
+    # FIX_NEEDED #2 carry-over). If psutil cannot see the
+    # process for some reason, we still want a sensible handle.
+    ps_proc: psutil.Process | None
+    try:
+        ps_proc = psutil.Process(proc.pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        ps_proc = None
+
+    # Windows has no pgid; use leader pid as sentinel for API uniformity.
+    pgid = proc.pid if IS_WINDOWS else os.getpgid(proc.pid)
     return ProcessHandle(
         proc=proc,
         argv=command.argv,
         pid=proc.pid,
         process_group=pgid,
+        psutil_proc=ps_proc,
     )
 
 
 def terminate_process_group(
     handle: ProcessHandle, *, grace_seconds: float = 5.0
 ) -> int | None:
-    """Send SIGTERM to the process group, escalate to SIGKILL.
+    """Best-effort cleanup of the spawned app and its descendants.
 
-    Returns the final exit code of the leader (None if it was
-    already gone). Errors during signal delivery are swallowed
-    — the goal is "best effort cleanup", and a ProcessLookupError
-    just means the child already exited.
+    POSIX (graceful):
+        ``killpg(pgid, SIGTERM)`` → poll for ``grace_seconds``
+        → ``killpg(pgid, SIGKILL)`` regardless. The SIGKILL step
+        runs even if the leader has already exited (Codex Phase
+        2-P diff review MUST-FIX) so no orphan descendants
+        survive in the process group.
+
+    Windows (NOT graceful — ``psutil.terminate()`` maps to
+    ``TerminateProcess``, the OS-level force-kill):
+        Enumerate the process tree via ``psutil.children(
+        recursive=True)`` and call ``terminate()`` (== kill) on
+        each. Then ``wait_procs`` for the grace window. Then
+        ``kill()`` again as a no-op to satisfy the API.
+
+        Caveat (Codex Phase 2-W MUST-FIX #3): if the leader
+        exits BEFORE we enumerate children, detached descendants
+        can be missed. A full no-orphan boundary on Windows
+        requires Job Objects; v0.18.0 deliberately defers that.
+
+    Returns the final exit code of the LEADER (None if it was
+    already gone or if ``wait()`` timed out).
     """
+    if IS_WINDOWS:
+        return _terminate_windows(handle, grace_seconds=grace_seconds)
+    return _terminate_posix(handle, grace_seconds=grace_seconds)
+
+
+def _terminate_posix(
+    handle: ProcessHandle, *, grace_seconds: float
+) -> int | None:
     # ProcessLookupError = child already exited; OSError covers
     # the "process group is gone" race. Either case is fine — we
     # fall through and let ``proc.poll`` confirm exit.
@@ -131,6 +228,37 @@ def terminate_process_group(
     # on an empty group is the success case.
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(handle.process_group, signal.SIGKILL)
+    try:
+        return handle.proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _terminate_windows(
+    handle: ProcessHandle, *, grace_seconds: float
+) -> int | None:
+    # On Windows ``psutil.terminate()`` maps to ``TerminateProcess``
+    # which is OS-level force-kill — there is no SIGTERM-equivalent
+    # graceful shutdown. Operators relying on graceful Werkzeug
+    # reloader shutdown should switch to a POSIX runner; on
+    # Windows the harness will hard-kill the tree.
+    procs: list[psutil.Process] = []
+    if handle.psutil_proc is not None:
+        try:
+            procs.append(handle.psutil_proc)
+            procs.extend(handle.psutil_proc.children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    for p in procs:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.terminate()
+    # ``wait_procs`` returns the procs that finished and those
+    # still alive; we don't act on alive ones differently — the
+    # kill() loop below is a no-op for procs already gone.
+    psutil.wait_procs(procs, timeout=max(0.1, grace_seconds))
+    for p in procs:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            p.kill()
     try:
         return handle.proc.wait(timeout=5.0)
     except subprocess.TimeoutExpired:

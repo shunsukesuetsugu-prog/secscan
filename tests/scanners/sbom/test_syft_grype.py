@@ -231,7 +231,10 @@ class TestGrypeArgvFromSbomFile:
             grype_argv(GrypeInvocation())
 
     def test_rejects_path_with_colon(self) -> None:
-        with pytest.raises(SbomInputError, match="not safe"):
+        # Phase 2-W: a colon outside the Windows drive-letter
+        # position is rejected by ``path_charset_check`` because
+        # it would collide with the docker -v separator.
+        with pytest.raises(SbomInputError, match="forbidden character"):
             grype_argv(
                 GrypeInvocation(sbom_file_path="/tmp/sb:om.json")
             )

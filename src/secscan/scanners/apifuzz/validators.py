@@ -42,23 +42,11 @@ MAX_SCHEMA_BYTES = 32 * 1024 * 1024
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 
 
-# Same path-charset rules as Phase 2-N: forbid ``:``, whitespace,
-# control chars, and backslash; allow Unicode (real dev machines).
-_FORBIDDEN_PATH_CHARS = frozenset(
-    [":", "\\", "\x00", "\n", "\r", "\t", "\v", "\f"]
-)
-
-
-def _path_charset_ok(s: str) -> bool:
-    for ch in s:
-        if ch in _FORBIDDEN_PATH_CHARS:
-            return False
-        if ch.isspace():
-            return False
-        if not ch.isprintable():
-            return False
-    return True
-
+# Path-charset rules: delegate to the cross-platform helper in
+# ``portability.py`` (Phase 2-W). Same OS-aware policy as the
+# SBOM validators — Windows paths get drive-colon + backslash
+# tolerance, POSIX paths get the strict gate.
+from ...portability import path_charset_check as _path_charset_ok  # noqa: E402
 
 _SCHEMA_FILE_EXTENSIONS = (".yaml", ".yml", ".json")
 

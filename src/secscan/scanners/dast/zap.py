@@ -475,19 +475,24 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
             "passing both is ambiguous"
         )
     if invocation.report_host_dir is not None:
-        # Defensive: refuse a host path containing ``:`` which would
-        # let an attacker inject additional bind-mount options
-        # (``/path:/zap/wrk:rw,extra`` etc.) by smuggling a colon
-        # into the directory name. ``tempfile.mkdtemp`` does not
-        # produce paths with ``:`` on supported platforms, but a
-        # caller passing a custom value must not slip past this.
-        if ":" in invocation.report_host_dir:
+        # Phase 2-W: convert the host path to docker's expected form
+        # on the current OS (POSIX paths pass through, Windows paths
+        # become /c/Users/...). path_charset_check rejects NUL/CR/LF/
+        # control chars on every OS; on Windows drive-colons and
+        # backslashes are tolerated because the conversion strips them.
+        from ...portability import path_charset_check, to_docker_host_path
+
+        if not path_charset_check(invocation.report_host_dir):
             raise DastInputError(
-                "report_host_dir must not contain ':' (would be interpreted "
-                "by docker as a bind-mount option separator)"
+                "report_host_dir contains a character that cannot be "
+                "safely used as a docker bind-mount source"
             )
         argv.extend(
-            ["-v", f"{invocation.report_host_dir}:{_ZAP_WORK_DIR}:rw"]
+            [
+                "-v",
+                f"{to_docker_host_path(invocation.report_host_dir)}:"
+                f"{_ZAP_WORK_DIR}:rw",
+            ]
         )
         argv.extend(["--security-opt=no-new-privileges"])
     elif invocation.report_volume is not None:

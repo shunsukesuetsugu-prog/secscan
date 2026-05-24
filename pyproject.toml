@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "secscan"
-version = "0.17.1"
+version = "0.18.0"
 description = "Cross-project vulnerability scanning CLI: dependency CVE, SAST, and secrets in one entry point."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,15 @@ dependencies = [
     # platforms without libyaml) so we keep it as a hard dependency rather
     # than gating monorepo support behind an extra.
     "PyYAML>=6.0",
+    # Phase 2-W: cross-platform process management for the IAST
+    # harness (Phase 2-P). The POSIX-only ``os.killpg`` /
+    # ``signal.SIGKILL`` path is replaced by ``psutil`` which
+    # gives us a uniform process-tree walk on Linux / macOS /
+    # Windows. psutil is the de facto cross-platform standard;
+    # the alternative (subprocess-spawned ``taskkill /F /T``) is
+    # SIGKILL-equivalent only and loses the graceful POSIX
+    # SIGTERM step.
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +62,8 @@ dev = [
     "jsonschema>=4.20",
     # Phase 2-B: mypy stubs for PyYAML.
     "types-PyYAML>=6.0",
+    # Phase 2-W: psutil mypy stubs for strict typing.
+    "types-psutil>=7.0",
     # During Phase 1A development we want both scanners' tools available so
     # the dev environment can be linted / type-checked / smoke-run end-to-end.
     "semgrep>=1.50",

@@ -870,6 +870,7 @@ specific Codex review iteration that motivated each invariant.
 | 2-N   | SBOM-based CVE scan (`secscan sbom`, Syft + Grype 2-step pipeline) | done (v0.15.0) |
 | 2-O   | OpenAPI fuzzing (`secscan apifuzz`, Schemathesis) | done (v0.16.0) |
 | 2-P   | IAST harness (`secscan iast`, pyrasp-aware) | done (v0.17.0) |
+| 2-W   | Windows full support (cross-platform: Linux + macOS + Windows) | done (v0.18.0) |
 
 ## Development
 
@@ -938,6 +939,75 @@ yarn then executes. secscan treats the `yarn` CLI (and the binary it
 points at) as trusted, same way it trusts `npm`, `pnpm`, `pip-audit`,
 and `semgrep`. **Do not** run `secscan deps` against an untrusted
 project root.
+
+## Windows support (Phase 2-W)
+
+secscan v0.18.0 runs natively on Linux, macOS, **and Windows**.
+The `pip install secscan` flow is identical across OSes; CI tests
+all three via a GitHub Actions matrix.
+
+### What works the same on every OS
+
+- All 9 scanners (`secrets`, `deps`, `sast`, `dast`, `config`,
+  `image`, `sbom`, `apifuzz`, `iast`).
+- Docker bind mounts: host paths are auto-converted to the
+  `/c/Users/...` Unix-style form Docker Desktop expects on
+  Windows (`secscan.portability.to_docker_host_path`). The
+  operator passes a native Windows path; secscan transforms it.
+- Loopback URL validation accepts `localhost`, `127.0.0.1`,
+  `[::1]` on every OS.
+- `gitleaks`, `semgrep`, `pip-audit`, `uv`, `npm`, `yarn` —
+  every external CLI secscan ships against has a Windows
+  binary.
+
+### IAST on Windows: best-effort cleanup
+
+The IAST harness (`secscan iast`) has a Windows-specific
+asymmetry, by design:
+
+- **POSIX (Linux/macOS)**: spawn-time `start_new_session=True`
+  + cleanup-time `os.killpg(pgid, SIGTERM)` → grace →
+  `SIGKILL`. The process group is killed atomically — Flask's
+  reloader and gunicorn workers cannot orphan-survive.
+- **Windows**: spawn-time `CREATE_NEW_PROCESS_GROUP` + cleanup-
+  time `psutil.children(recursive=True)` + `terminate()` (which
+  on Windows is `TerminateProcess`, the OS-level **force-kill**
+  — NOT SIGTERM-equivalent). The harness walks the parent-
+  child tree and kills each process individually. A descendant
+  that gets `parent_pid=0` (detached, e.g. via the `DETACHED_
+  PROCESS` flag) can survive the cleanup.
+
+In practice this means:
+
+- Regular Flask / FastAPI apps shut down cleanly on Windows
+  (the reloader child is a normal descendant).
+- Apps that intentionally detach themselves (Windows services,
+  uvicorn workers spawned via `spawn` start method) may leak
+  on Windows. Use POSIX (Linux/macOS, or WSL2 on Windows) for
+  those scenarios.
+
+A Windows Job Object-based hard boundary is a possible future
+enhancement; v0.18.0 deliberately accepts the best-effort
+semantics to keep the scanner adapter simple.
+
+### Path conventions
+
+- secscan accepts Windows paths in their native form
+  (`C:\Users\foo`) on the CLI and in `.secscan.toml`.
+- All Docker bind mount sites convert the path to
+  `/c/Users/foo` before passing to `docker -v`.
+- `as_posix()` is used for display so reports remain
+  consistent across OSes.
+
+### Cross-OS testing
+
+```sh
+# All three OSes are exercised in CI via:
+# .github/workflows/ci.yml — matrix [ubuntu-latest, macos-latest, windows-latest]
+# Unit tests cover the path-helper logic with simulated
+# IS_WINDOWS=True / False so the Windows-branch code is
+# exercised on POSIX hosts too.
+```
 
 ## Known limitations
 

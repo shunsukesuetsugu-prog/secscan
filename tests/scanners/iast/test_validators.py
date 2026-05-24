@@ -11,6 +11,7 @@ harness. These tests pin:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -278,14 +279,16 @@ class TestCodexDiffReviewRegressions:
         with pytest.raises(IastInputError, match="control character"):
             validate_command_argv("python -c 'a\nrm -rf /'")
 
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"),
+        reason="os.mkfifo is POSIX-only — Phase 2-W skip on Windows",
+    )
     def test_pyrasp_log_pointing_at_fifo_rejected(
         self, tmp_path: Path
     ) -> None:
         """A FIFO / device file as the pyrasp log path is suspicious
         — pyrasp would block on write and the parser would behave
         unpredictably. The pre-existence check catches this."""
-        import os
-
         fifo = tmp_path / "p.json"
         os.mkfifo(fifo)
         try:

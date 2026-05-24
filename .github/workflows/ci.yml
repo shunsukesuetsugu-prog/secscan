@@ -1,0 +1,45 @@
+name: CI
+
+# Phase 2-W: cross-platform CI matrix. secscan supports Linux, macOS,
+# and Windows natively (with IAST being best-effort cleanup on Windows
+# — see README "Windows support" section). The matrix runs unit tests
+# on all three OSes; docker-driven scanners are skipped on the Windows
+# runner because GitHub-hosted Windows VMs don't ship Docker by default.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install secscan + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: python -m ruff check src/ tests/ bench/
+
+      - name: Type check (mypy)
+        run: python -m mypy --strict src/secscan
+
+      - name: Unit tests (excluding integration that need external bins)
+        run: python -m pytest -q --ignore=tests/integration

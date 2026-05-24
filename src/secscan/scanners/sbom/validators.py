@@ -49,29 +49,13 @@ class SbomInputError(ValueError):
 # describing a multi-thousand-package monorepo rarely tops 5 MiB.
 MAX_SBOM_BYTES = 32 * 1024 * 1024
 
-# Path-charset rules for bind-mount sources: ``:`` (would break
-# docker ``-v <src>:<dst>`` syntax), whitespace (would split argv),
-# control / non-printable chars, and ``\`` (Windows-style separator
-# that confuses docker on Linux containers) are all rejected.
-# We deliberately ALLOW Unicode letters — paths containing
-# non-ASCII (e.g. Japanese, European accented characters) are
-# common on real developer filesystems and have no docker-argv
-# implication beyond the explicit deny list. Codex Phase 2-L pin:
-# any whitespace or control char is rejected.
-_FORBIDDEN_PATH_CHARS = frozenset(
-    [":", "\\", "\x00", "\n", "\r", "\t", "\v", "\f"]
-)
-
-
-def _path_charset_ok(s: str) -> bool:
-    for ch in s:
-        if ch in _FORBIDDEN_PATH_CHARS:
-            return False
-        if ch.isspace():
-            return False
-        if not ch.isprintable():
-            return False
-    return True
+# Path-charset rules: delegate to the cross-platform helper in
+# ``portability.py``. Phase 2-W replaced the previous hard-rejection
+# of ``:``/``\\``/whitespace with an OS-aware policy so Windows
+# paths (drive-colon, backslash separator, ``Program Files`` style
+# spaces) are tolerated before ``to_docker_host_path`` converts
+# them to the Unix-style form docker expects.
+from ...portability import path_charset_check as _path_charset_ok  # noqa: E402
 
 # Accepted SBOM-file extensions. CycloneDX (``.cdx.json``) is the
 # default Syft format and the one we feed to Grype internally; we
