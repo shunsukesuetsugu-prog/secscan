@@ -162,7 +162,10 @@ def spawn_app(
         ps_proc = None
 
     # Windows has no pgid; use leader pid as sentinel for API uniformity.
-    pgid = proc.pid if IS_WINDOWS else os.getpgid(proc.pid)
+    # ``os.getpgid`` is POSIX-only — guarded by ``IS_WINDOWS`` but mypy's
+    # static analysis does not narrow through the aliased constant, so
+    # silence the per-platform attr-defined here.
+    pgid = proc.pid if IS_WINDOWS else os.getpgid(proc.pid)  # type: ignore[attr-defined,unused-ignore]
     return ProcessHandle(
         proc=proc,
         argv=command.argv,
@@ -211,7 +214,7 @@ def _terminate_posix(
     # the "process group is gone" race. Either case is fine — we
     # fall through and let ``proc.poll`` confirm exit.
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        os.killpg(handle.process_group, signal.SIGTERM)
+        os.killpg(handle.process_group, signal.SIGTERM)  # type: ignore[attr-defined,unused-ignore]
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while time.monotonic() < deadline:
         if handle.proc.poll() is not None:
@@ -227,7 +230,7 @@ def _terminate_posix(
     # of whether the leader has already reaped. ProcessLookupError
     # on an empty group is the success case.
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        os.killpg(handle.process_group, signal.SIGKILL)
+        os.killpg(handle.process_group, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
     try:
         return handle.proc.wait(timeout=5.0)
     except subprocess.TimeoutExpired:
