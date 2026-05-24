@@ -1,0 +1,51 @@
+{
+  "tool_under_test": "secscan dast",
+  "comparison_tool": "zap-baseline.py (direct)",
+  "target": "http://host.docker.internal:3000/",
+  "advisory_db_snapshot": "2026-05-24",
+  "image_pinning": {
+    "juice_shop": "bkimminich/juice-shop@sha256:babfd4e9685b71f3da564cb35f02e870d3dc7d0f444954064bff4bc38602af6b",
+    "zap": "zaproxy/zap-stable@sha256:8770b23f9e8b49038f413cb2b10c58c901e5b6717be221a22b1bcab5c9771b8a",
+    "helper": "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+  },
+  "notes": [
+    "OWASP Juice Shop is a deliberately-vulnerable Node.js web app",
+    "shipped by OWASP for DAST training. Running ZAP baseline against",
+    "it reliably surfaces a known set of HTTP-layer alerts (CSP,",
+    "cross-origin, dangerous JS function calls, etc.) — the recall",
+    "check below requires secscan to detect each one.",
+    "Match logic: secscan Finding.rule_id == ZAP pluginid. A fixture",
+    "entry counts as detected when at least one secscan finding has",
+    "that pluginid. The set below is the stable baseline observed",
+    "with zap-baseline against juice-shop v17.0.0; if Juice Shop",
+    "rolls forward or ZAP's plugin IDs change, regenerate the set",
+    "via a manual ``secscan dast`` run and update this file."
+  ],
+  "expected_findings": [
+    {
+      "pluginid": "10038",
+      "name": "Content Security Policy (CSP) Header Not Set",
+      "min_severity": "MEDIUM"
+    },
+    {
+      "pluginid": "10098",
+      "name": "Cross-Domain Misconfiguration",
+      "min_severity": "MEDIUM"
+    },
+    {
+      "pluginid": "10017",
+      "name": "Cross-Domain JavaScript Source File Inclusion",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "10110",
+      "name": "Dangerous JS Functions",
+      "min_severity": "LOW"
+    },
+    {
+      "pluginid": "10109",
+      "name": "Modern Web Application",
+      "min_severity": "INFO"
+    }
+  ]
+}

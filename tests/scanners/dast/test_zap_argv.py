@@ -70,10 +70,23 @@ class TestBuildArgv:
         t_idx = zap_tail.index("-t")
         assert zap_tail[t_idx + 1] == _TARGET
 
-    def test_report_goes_to_stdout(self) -> None:
+    def test_report_arg_only_with_volume_or_dir(self) -> None:
+        """Phase 2-H: ``-J report.json`` only appears when the
+        invocation declares where the report should land (either
+        a bind mount or a named volume). Without either, ZAP would
+        refuse the report flag (``/zap/wrk`` unmounted), so the
+        argv builder omits it."""
+        # No mount declared → no ``-J`` flag.
         argv = build_argv(_invocation())
-        j_idx = argv.index("-J")
-        assert argv[j_idx + 1] == "/dev/stdout"
+        assert "-J" not in argv
+
+        # Named volume declared → ``-J report.json`` (relative to
+        # the in-container /zap/wrk mount).
+        argv_vol = build_argv(_invocation(report_volume="secscan-zap-abc"))
+        j_idx = argv_vol.index("-J")
+        assert argv_vol[j_idx + 1] == "report.json"
+        # Old ``-J /dev/stdout`` pattern is gone — ZAP rejects it.
+        assert "/dev/stdout" not in argv_vol
 
     def test_host_network_opt_in(self) -> None:
         argv_host = build_argv(_invocation(network_mode="host"))

@@ -116,28 +116,77 @@ def _report(alerts: list[dict[str, object]]) -> bytes:
     return json.dumps({"site": [{"alerts": alerts}]}).encode()
 
 
+def _push_scan_lifecycle(
+    fake_runner: FakeRunner,
+    *,
+    scan_returncode: int,
+    scan_stdout: bytes,
+    scan_stderr: bytes = b"",
+    scan_timed_out: bool = False,
+) -> None:
+    """Push the four CommandResults the Phase 2-H DastScanner needs:
+
+    1. ``docker volume create`` — always succeeds in tests (rc=0).
+    2. ``docker run alpine chown`` — always succeeds (rc=0).
+    3. ``docker run zap zap-baseline.py`` — the test-supplied response.
+    4. ``docker run alpine cat /wrk/report.json`` — supplies the
+       report bytes via stdout (mirrors the production extraction).
+    5. (in finally) ``docker volume rm`` — pushed but optional.
+
+    The cleanup ``docker volume rm`` call is best-effort; we push a
+    response so the FakeRunner doesn't assert out, but the
+    scanner's finally swallows non-zero exits with a stderr
+    warning.
+    """
+    fake_runner.push(returncode=0)  # volume create
+    fake_runner.push(returncode=0)  # chown
+    fake_runner.push(
+        returncode=scan_returncode,
+        stdout=b"",  # ZAP scan stdout is ignored — report comes via extract
+        stderr=scan_stderr,
+        timed_out=scan_timed_out,
+    )
+    fake_runner.push(returncode=0, stdout=scan_stdout)  # extract via cat
+    fake_runner.push(returncode=0)  # volume rm (in finally)
+
+
 class TestDastScannerHappyPath:
     def test_clean_run_returns_zero_findings(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
     ) -> None:
-        fake_runner.push(returncode=0, stdout=_report([]))
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         outcome = DastScanner().scan(work_unit, fake_runner, _config())
         assert outcome.error is None
         assert outcome.findings == ()
 
-    def test_runner_invoked_once_with_expected_argv(
+    def test_zap_argv_is_the_third_docker_call(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
     ) -> None:
-        fake_runner.push(returncode=0, stdout=_report([]))
+        """Phase 2-H lifecycle: docker volume create → chown helper →
+        ZAP scan → cat helper → volume rm. The 3rd call (index 2)
+        is the ZAP container and must carry the documented safety
+        flags."""
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         DastScanner().scan(work_unit, fake_runner, _config())
-        assert len(fake_runner.calls) == 1
-        argv, _cwd, timeout = fake_runner.calls[0]
+        # 5 docker calls total: create, chown, scan, extract, rm.
+        assert len(fake_runner.calls) == 5
+        argv, _cwd, timeout = fake_runner.calls[2]
         assert timeout == 120
         assert argv[0] == "docker"
         assert argv[1] == "run"
         assert "--cap-drop=ALL" in argv
+        assert "--security-opt=no-new-privileges" in argv
         assert "--" in argv
         assert _VALID_IMAGE in argv
+        # ``-J report.json`` MUST appear (Phase 2-H bug fix — older
+        # ``-J /dev/stdout`` was rejected by ZAP).
+        assert "-J" in argv
+        assert "report.json" in argv
+        assert "/dev/stdout" not in argv
 
     def test_findings_present_on_exit_2(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
@@ -152,7 +201,9 @@ class TestDastScannerHappyPath:
                 }
             ]
         )
-        fake_runner.push(returncode=2, stdout=report)
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=2, scan_stdout=report
+        )
         outcome = DastScanner().scan(work_unit, fake_runner, _config())
         (finding,) = outcome.findings
         assert finding.severity == Severity.MEDIUM
@@ -165,18 +216,18 @@ class TestDastScannerHappyPath:
         """ZAP returns 1 when only warn-level alerts are present.
         Treat it the same as 2 for parsing purposes — it's not an
         error condition."""
-        fake_runner.push(
-            returncode=1,
-            stdout=_report(
-                [
-                    {
-                        "pluginid": "10",
-                        "name": "info",
-                        "riskcode": 0,
-                        "instances": [{"uri": "https://example.com/a"}],
-                    }
-                ]
-            ),
+        report = _report(
+            [
+                {
+                    "pluginid": "10",
+                    "name": "info",
+                    "riskcode": 0,
+                    "instances": [{"uri": "https://example.com/a"}],
+                }
+            ]
+        )
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=1, scan_stdout=report
         )
         outcome = DastScanner().scan(work_unit, fake_runner, _config())
         assert outcome.error is None
@@ -185,12 +236,28 @@ class TestDastScannerHappyPath:
     def test_private_target_warning_surfaces(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
     ) -> None:
-        fake_runner.push(returncode=0, stdout=_report([]))
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         outcome = DastScanner().scan(
             work_unit, fake_runner, _config(target="http://127.0.0.1:8080/")
         )
         assert outcome.error is None
         assert any("private or loopback" in w for w in outcome.warnings)
+
+    def test_volume_lifecycle_cleanup_called(
+        self, fake_runner: FakeRunner, work_unit: WorkUnit
+    ) -> None:
+        """Phase 2-H invariant: ``docker volume rm`` MUST be called
+        in the finally branch even when the scan succeeds, so
+        orphaned ``secscan-zap-*`` volumes don't pile up."""
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
+        DastScanner().scan(work_unit, fake_runner, _config())
+        # Last call is the cleanup.
+        argv, _cwd, _t = fake_runner.calls[-1]
+        assert argv[:4] == ("docker", "volume", "rm", "--force")
 
 
 class TestDastScannerErrorPaths:
@@ -225,7 +292,12 @@ class TestDastScannerErrorPaths:
     def test_timeout_is_error(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
     ) -> None:
-        fake_runner.push(returncode=0, stdout=b"", timed_out=True)
+        _push_scan_lifecycle(
+            fake_runner,
+            scan_returncode=0,
+            scan_stdout=b"",
+            scan_timed_out=True,
+        )
         outcome = DastScanner().scan(work_unit, fake_runner, _config())
         assert outcome.error is not None
         assert "timed out" in outcome.error.reason.lower()
@@ -233,7 +305,12 @@ class TestDastScannerErrorPaths:
     def test_unknown_exit_code_is_error(
         self, fake_runner: FakeRunner, work_unit: WorkUnit
     ) -> None:
-        fake_runner.push(returncode=125, stdout=b"", stderr=b"docker: bad image")
+        _push_scan_lifecycle(
+            fake_runner,
+            scan_returncode=125,
+            scan_stdout=b"",
+            scan_stderr=b"docker: bad image",
+        )
         outcome = DastScanner().scan(work_unit, fake_runner, _config())
         assert outcome.error is not None
         assert "exited with 125" in outcome.error.reason
@@ -284,7 +361,9 @@ class TestDastScannerDefaults:
     ) -> None:
         """``image`` in extras may be missing or empty; the scanner
         falls back to ``DEFAULT_ZAP_IMAGE``."""
-        fake_runner.push(returncode=0, stdout=_report([]))
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         cfg = ScanConfig(
             timeout_seconds=60,
             extra=MappingProxyType(
@@ -298,7 +377,8 @@ class TestDastScannerDefaults:
             ),
         )
         DastScanner().scan(work_unit, fake_runner, cfg)
-        argv, _cwd, _t = fake_runner.calls[0]
+        # Phase 2-H: call 2 (index 2) is the ZAP scan.
+        argv, _cwd, _t = fake_runner.calls[2]
         assert DEFAULT_ZAP_IMAGE in argv
 
     def test_empty_string_image_falls_back_to_default(
@@ -307,7 +387,9 @@ class TestDastScannerDefaults:
         """Codex Phase 2-D diff review: ``image=""`` previously slid
         through and would hit the docker argv as a bare empty value.
         Strip + fallback to ``DEFAULT_ZAP_IMAGE`` instead."""
-        fake_runner.push(returncode=0, stdout=_report([]))
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         cfg = ScanConfig(
             timeout_seconds=60,
             extra=MappingProxyType(
@@ -321,7 +403,7 @@ class TestDastScannerDefaults:
             ),
         )
         DastScanner().scan(work_unit, fake_runner, cfg)
-        argv, _cwd, _t = fake_runner.calls[0]
+        argv, _cwd, _t = fake_runner.calls[2]
         assert DEFAULT_ZAP_IMAGE in argv
 
     def test_empty_config_file_is_treated_as_absent(
@@ -330,7 +412,9 @@ class TestDastScannerDefaults:
         """Codex Phase 2-D diff review: ``config_file=""`` previously
         ended up as ``-n ""`` in the argv. Treat empty / whitespace
         as "no config file" instead."""
-        fake_runner.push(returncode=0, stdout=_report([]))
+        _push_scan_lifecycle(
+            fake_runner, scan_returncode=0, scan_stdout=_report([])
+        )
         cfg = ScanConfig(
             timeout_seconds=60,
             extra=MappingProxyType(
@@ -344,7 +428,7 @@ class TestDastScannerDefaults:
             ),
         )
         DastScanner().scan(work_unit, fake_runner, cfg)
-        argv, _cwd, _t = fake_runner.calls[0]
+        argv, _cwd, _t = fake_runner.calls[2]
         assert "-n" not in argv
 
     def test_ajax_spider_must_be_bool(

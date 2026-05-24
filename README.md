@@ -331,10 +331,11 @@ snapshot; see `bench/report.md` for the full table):
 | sast    | python | 4 | 4 | **100%** | 0 | ≥ semgrep ✅ |
 | sast    | javascript | 2 | 2 | **100%** | 0 | = semgrep ✅ |
 | secrets | synthetic | 4 | 4 | **100%** | 0 | = gitleaks ✅ |
-| dast    | juice-shop | — | — | SKIPPED | — | run manually |
+| dast    | juice-shop | 5 | 5 | **100%** | 0 | = zap-baseline ✅ |
 
-**Overall recall: 15/15 = 100%**, false positives: **0**, ≥ best
-single tool: **4/4**.
+**Overall recall: 20/20 = 100%**, false positives: **0**, ≥ best
+single tool: **4/4**. Run with `--dast` to include the OWASP Juice
+Shop measurement (requires docker; adds 2-4 minutes).
 
 Phase 2-F + 2-G tuning (post-initial benchmark) lifted recall
 from 54.5% → 86.7% → **100%** by:
@@ -360,12 +361,19 @@ from 54.5% → 86.7% → **100%** by:
 
 What's still scope-limited rather than a recall miss:
 
-- **DAST**: deliberately a manual measurement (Docker + OWASP
-  Juice Shop bring-up is too heavy for CI).
 - **Real-codebase FP rate**: the curated `safe_*` borderline
   fixtures stay clean, but they don't represent the full
   diversity of real source trees. Adding `p/security-audit` for
   even broader CWE coverage is opt-in via `[sast].semgrep_config`.
+
+Phase 2-H added the DAST measurement (`bench/run.py --dast`).
+Lifecycle: bring up OWASP Juice Shop on `127.0.0.1:3000` →
+`secscan dast` internally orchestrates a docker volume + Alpine
+helper chown + zap-baseline.py scan + report extraction → compare
+detected ZAP pluginids against `bench/fixtures/dast/juice-shop/
+expected.json`. The `--dast` flag is opt-in because the full
+lifecycle takes 2-4 minutes; the fast `bench/run.py` (no flag)
+skips it.
 
 See `bench/README.md` for the full methodology, retraction policy,
 and how to add new fixtures.
@@ -416,7 +424,8 @@ specific Codex review iteration that motivated each invariant.
 | 2-E   | detection-rate benchmark (bench/)                  | done (v0.6.0)           |
 | 2-F   | tune defaults to improve bench recall (54.5% → 86.7%) | done (v0.7.0)        |
 | 2-G   | bundled secscan semgrep rules (recall 86.7% → 100%) | done (v0.8.0)          |
-| 2-H+  | DAST profile catalogue, broader fixture corpus       | future                |
+| 2-H   | DAST 自動計測 (Juice Shop + docker volume lifecycle) | done (v0.9.0)         |
+| 2-I+  | broader fixture corpus, multi-target DAST profiles  | future                 |
 
 ## Development
 

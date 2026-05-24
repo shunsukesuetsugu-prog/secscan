@@ -256,6 +256,70 @@ class ZapInvocation:
     network_mode: str = "bridge"
     """``bridge`` (default) or ``host``. ``host`` is only honored when
     the operator passes ``--zap-network host``."""
+    report_host_dir: str | None = None
+    """Host directory bind-mounted into the container at the documented
+    ZAP work dir (``/zap/wrk``). Kept for backwards-compatible test
+    invocations of ``build_argv``; production code now prefers
+    ``report_volume`` (Phase 2-H attempt 2) because bind mounts on
+    macOS/colima map the host directory to root:root inside the
+    container regardless of host permissions, and ``--cap-drop=ALL``
+    leaves the ZAP user (UID 1000) unable to write there.
+    """
+
+    report_volume: str | None = None
+    """Docker named volume mounted at ``/zap/wrk`` in the container.
+
+    Phase 2-H: the DastScanner creates this volume, ``chown``s it
+    to the ZAP image's UID (1000) via an Alpine helper container,
+    runs the ZAP scan against it, then ``cat``s the report out via
+    a second Alpine helper and finally ``docker volume rm``s it.
+    Named volumes (unlike bind mounts) honour the in-container
+    ownership the helper sets, so this works the same on native
+    Linux Docker, Docker Desktop, and colima.
+
+    Set EITHER ``report_host_dir`` OR ``report_volume`` (not both).
+    Tests that exercise argv shape without docker may set neither.
+    """
+
+
+# Container-side mount point. ZAP's image uses ``/zap/wrk`` as the
+# documented working directory for input contexts and output reports
+# (https://www.zaproxy.org/docs/docker/baseline-scan/). Mounting our
+# host tempdir at that path keeps ZAP's relative path resolution
+# happy and keeps the container's view minimal.
+_ZAP_WORK_DIR = "/zap/wrk"
+_ZAP_REPORT_NAME = "report.json"
+
+# In-container UID of the ZAP user. The image's documented user is
+# ``zap`` (UID 1000); the Alpine helper container chowns the named
+# volume to this UID before we hand it to the scan container so that
+# ZAP (running with ``--cap-drop=ALL``) can write its report.
+ZAP_CONTAINER_UID = 1000
+ZAP_CONTAINER_GID = 1000
+
+# Small, well-known image used to chown the volume before ZAP runs
+# and to ``cat`` the report out afterwards. Digest-pinned for the
+# same supply-chain reasons we pin the ZAP image. ``alpine:3.20`` is
+# the latest LTS line at fixture-creation time; rotate via the same
+# process described in ``_pinned.py``.
+HELPER_IMAGE = (
+    "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+)
+
+# Docker object names (containers, volumes) accept a narrow charset
+# per the docker CLI grammar. We restrict our generated names to the
+# safe subset so an attacker can never inject argv via the name.
+_DOCKER_OBJECT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$")
+
+
+def validate_docker_object_name(name: str, *, kind: str) -> str:
+    """Reject docker container/volume names outside the safe charset."""
+    if not isinstance(name, str) or not _DOCKER_OBJECT_NAME_RE.match(name):
+        raise DastInputError(
+            f"{kind} name {name!r} contains characters outside the docker "
+            "object-name charset ([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})"
+        )
+    return name
 
 
 def build_argv(invocation: ZapInvocation) -> list[str]:
@@ -265,6 +329,12 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
     line are positionally on the RIGHT side of a ``--`` separator,
     making any future flag-shaped image value (which validation
     already forbids) unable to bleed into docker's option parsing.
+
+    When ``invocation.report_host_dir`` is set, the host directory is
+    bind-mounted into the container at ``/zap/wrk`` and ZAP is told
+    to write ``report.json`` there. The caller is responsible for
+    creating the tempdir (0700) and reading the report back after
+    the container exits.
     """
     if invocation.network_mode not in ("bridge", "host"):
         raise DastInputError(
@@ -282,15 +352,51 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
         "--rm",
         "--cap-drop=ALL",
         f"--network={invocation.network_mode}",
-        "-t",
-        "--",
-        image_ref,
-        "zap-baseline.py",
-        "-t",
-        invocation.target_url,
-        "-J",
-        "/dev/stdout",
     ]
+    if invocation.report_host_dir is not None and invocation.report_volume is not None:
+        raise DastInputError(
+            "set EITHER report_host_dir OR report_volume; "
+            "passing both is ambiguous"
+        )
+    if invocation.report_host_dir is not None:
+        # Defensive: refuse a host path containing ``:`` which would
+        # let an attacker inject additional bind-mount options
+        # (``/path:/zap/wrk:rw,extra`` etc.) by smuggling a colon
+        # into the directory name. ``tempfile.mkdtemp`` does not
+        # produce paths with ``:`` on supported platforms, but a
+        # caller passing a custom value must not slip past this.
+        if ":" in invocation.report_host_dir:
+            raise DastInputError(
+                "report_host_dir must not contain ':' (would be interpreted "
+                "by docker as a bind-mount option separator)"
+            )
+        argv.extend(
+            ["-v", f"{invocation.report_host_dir}:{_ZAP_WORK_DIR}:rw"]
+        )
+        argv.extend(["--security-opt=no-new-privileges"])
+    elif invocation.report_volume is not None:
+        validate_docker_object_name(invocation.report_volume, kind="volume")
+        argv.extend(
+            ["-v", f"{invocation.report_volume}:{_ZAP_WORK_DIR}:rw"]
+        )
+        argv.extend(["--security-opt=no-new-privileges"])
+    argv.extend(
+        [
+            "-t",
+            "--",
+            image_ref,
+            "zap-baseline.py",
+            "-t",
+            invocation.target_url,
+        ]
+    )
+    if (
+        invocation.report_host_dir is not None
+        or invocation.report_volume is not None
+    ):
+        # zap-baseline.py resolves ``-J`` paths relative to /zap/wrk
+        # inside the container, so the bare filename is correct.
+        argv.extend(["-J", _ZAP_REPORT_NAME])
 
     if invocation.ajax_spider:
         argv.append("-j")
@@ -298,8 +404,8 @@ def build_argv(invocation: ZapInvocation) -> list[str]:
     if invocation.config_file is not None:
         # ZAP context file path lives inside the container; the operator
         # is expected to mount it themselves (we deliberately don't add
-        # ``-v`` automatically — that would be a docker socket adjacent
-        # surface). We just propagate the path string.
+        # an additional bind mount for it — that's the operator's
+        # responsibility outside the report tempdir).
         argv.extend(["-n", invocation.config_file])
 
     return argv

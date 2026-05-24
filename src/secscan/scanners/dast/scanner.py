@@ -19,6 +19,7 @@ Critical invariants (see also ``docs/_design/phase2d_dast_design.md``):
 
 from __future__ import annotations
 
+import secrets as _secrets
 import shutil
 from dataclasses import dataclass
 
@@ -33,13 +34,87 @@ from ...runner import CommandRunner, decode_output
 from ..base import Scanner, ToolNotFoundError
 from ._pinned import DEFAULT_ZAP_IMAGE
 from .zap import (
+    HELPER_IMAGE,
+    ZAP_CONTAINER_GID,
+    ZAP_CONTAINER_UID,
     DastInputError,
     ZapInvocation,
     build_argv,
     parse_zap_report,
+    validate_docker_object_name,
     validate_image_ref,
     validate_target_url,
 )
+
+# Helper-container argv builders. Kept as module-level so unit tests
+# can call them without spawning real docker.
+
+_VOL_MOUNT_RW = "/wrk"
+
+
+def _vol_create_argv(vol: str) -> list[str]:
+    validate_docker_object_name(vol, kind="volume")
+    return ["docker", "volume", "create", vol]
+
+
+def _vol_chown_argv(vol: str) -> list[str]:
+    """Run an Alpine helper to chown the volume to the ZAP UID/GID
+    so the scan container (running with ``--cap-drop=ALL``) can
+    write its report.
+
+    Codex Phase 2-H diff review tightening: ``--cap-drop=ALL`` then
+    ``--cap-add=CHOWN``. ``chown`` needs CAP_CHOWN; FOWNER is not
+    required when changing UID/GID on a fresh empty volume root.
+    Restricting to the single capability shrinks the helper's
+    privilege envelope dramatically (no NET_BIND_SERVICE,
+    SYS_ADMIN, etc. available to it). Helper also runs with
+    ``--network=none`` so it has no outbound reachability.
+    """
+    validate_docker_object_name(vol, kind="volume")
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--cap-drop=ALL",
+        "--cap-add=CHOWN",
+        "--security-opt=no-new-privileges",
+        "-v",
+        f"{vol}:{_VOL_MOUNT_RW}:rw",
+        "--",
+        HELPER_IMAGE,
+        "chown",
+        f"{ZAP_CONTAINER_UID}:{ZAP_CONTAINER_GID}",
+        _VOL_MOUNT_RW,
+    ]
+
+
+def _vol_extract_argv(vol: str) -> list[str]:
+    """Run an Alpine helper to ``cat`` the ZAP report to stdout, so
+    we can capture it via ``CommandResult.stdout`` without bind-
+    mounting a host path (avoiding the colima/Docker Desktop UID
+    mapping problem). Read-only mount, dropped caps, no network.
+    """
+    validate_docker_object_name(vol, kind="volume")
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "-v",
+        f"{vol}:{_VOL_MOUNT_RW}:ro",
+        "--",
+        HELPER_IMAGE,
+        "cat",
+        f"{_VOL_MOUNT_RW}/report.json",
+    ]
+
+
+def _vol_remove_argv(vol: str) -> list[str]:
+    validate_docker_object_name(vol, kind="volume")
+    return ["docker", "volume", "rm", "--force", vol]
 
 # ZAP baseline exit-code conventions:
 #   0: clean, no alerts
@@ -113,57 +188,158 @@ class DastScanner(Scanner):
                 duration=0.0,
             )
 
-        invocation = ZapInvocation(
-            target_url=canonical_target,
-            image_ref=image_ref,
-            ajax_spider=dast_config.ajax_spider,
-            config_file=dast_config.config_file,
-            network_mode=dast_config.network_mode,
-        )
+        # Phase 2-H: use a docker named volume + Alpine helper
+        # containers so the report path round-trip works on
+        # colima/Docker Desktop (which map host bind-mounts to root
+        # in-container regardless of host permissions) as well as
+        # native Linux Docker. Lifecycle:
+        #
+        #   1. ``docker volume create <vol>``
+        #   2. ``docker run alpine chown 1000:1000 /wrk`` (prep)
+        #   3. ``docker run zap zap-baseline.py -J report.json``
+        #   4. ``docker run alpine cat /wrk/report.json`` (extract)
+        #   5. ``docker volume rm <vol>``  (in finally)
+        #
+        # Volume name uses ``token_hex(8)`` for unguessability so a
+        # concurrent run on the same daemon can't collide with us.
+        volume_name = f"secscan-zap-{_secrets.token_hex(8)}"
+        # Defence in depth: the generator above only uses hex, but
+        # validating once here catches any future change that might
+        # accidentally widen the charset.
+        validate_docker_object_name(volume_name, kind="volume")
+        report_bytes = b""
+        scan_result = None
+        # Codex Phase 2-H diff review: only attempt ``docker volume rm``
+        # if the create actually succeeded — otherwise the finally
+        # branch would try to remove a non-existent volume and the
+        # operator gets a spurious "Error: No such volume" stderr
+        # warning on every failed-startup path.
+        volume_created = False
         try:
-            argv = build_argv(invocation)
-        except DastInputError as exc:
-            return _error_outcome(
-                self.name,
-                reason=str(exc),
-                returncode=None,
-                stderr=b"",
-                duration=0.0,
+            # Step 1: create volume.
+            create_res = runner.run(
+                _vol_create_argv(volume_name),
+                cwd=unit.root,
+                timeout_seconds=60,
             )
+            if create_res.returncode != 0:
+                return _error_outcome(
+                    self.name,
+                    reason="docker volume create failed",
+                    returncode=create_res.returncode,
+                    stderr=create_res.stderr,
+                    duration=create_res.duration_seconds,
+                )
+            volume_created = True
 
-        result = runner.run(
-            argv,
-            cwd=unit.root,
-            timeout_seconds=config.timeout_seconds,
-        )
-
-        if result.timed_out:
-            return _error_outcome(
-                self.name,
-                reason="ZAP scan timed out",
-                returncode=result.returncode,
-                stderr=result.stderr,
-                duration=result.duration_seconds,
+            # Step 2: chown volume to ZAP UID.
+            chown_res = runner.run(
+                _vol_chown_argv(volume_name),
+                cwd=unit.root,
+                timeout_seconds=120,
             )
+            if chown_res.returncode != 0:
+                return _error_outcome(
+                    self.name,
+                    reason="alpine helper chown failed",
+                    returncode=chown_res.returncode,
+                    stderr=chown_res.stderr,
+                    duration=chown_res.duration_seconds,
+                )
 
-        if result.returncode not in _ZAP_SUCCESS_EXIT_CODES:
-            return _error_outcome(
-                self.name,
-                reason=f"docker/ZAP exited with {result.returncode}",
-                returncode=result.returncode,
-                stderr=result.stderr,
-                duration=result.duration_seconds,
+            # Step 3: the actual ZAP scan.
+            invocation = ZapInvocation(
+                target_url=canonical_target,
+                image_ref=image_ref,
+                ajax_spider=dast_config.ajax_spider,
+                config_file=dast_config.config_file,
+                network_mode=dast_config.network_mode,
+                report_volume=volume_name,
             )
+            try:
+                scan_argv = build_argv(invocation)
+            except DastInputError as exc:
+                return _error_outcome(
+                    self.name,
+                    reason=str(exc),
+                    returncode=None,
+                    stderr=b"",
+                    duration=0.0,
+                )
+            scan_result = runner.run(
+                scan_argv,
+                cwd=unit.root,
+                timeout_seconds=config.timeout_seconds,
+            )
+            if scan_result.timed_out:
+                return _error_outcome(
+                    self.name,
+                    reason="ZAP scan timed out",
+                    returncode=scan_result.returncode,
+                    stderr=scan_result.stderr,
+                    duration=scan_result.duration_seconds,
+                )
 
-        parsed = parse_zap_report(result.stdout, target_host=target_host)
-        all_warnings: tuple[str, ...] = tuple(target_warnings) + parsed.warnings
-        return ScanOutcome(
-            scanner=self.name,
-            findings=parsed.findings,
-            warnings=all_warnings,
-            tool_version=parsed.zap_version,
-            duration_seconds=result.duration_seconds,
-        )
+            # Step 4: extract report via alpine helper.
+            # Run extract even if ZAP exited non-zero — the JSON may
+            # still exist (warnings or partial results) and the
+            # parser will surface that. We only short-circuit on
+            # genuinely unrecoverable ZAP failures below.
+            extract_res = runner.run(
+                _vol_extract_argv(volume_name),
+                cwd=unit.root,
+                timeout_seconds=60,
+            )
+            if extract_res.returncode == 0:
+                report_bytes = extract_res.stdout
+
+            if scan_result.returncode not in _ZAP_SUCCESS_EXIT_CODES:
+                return _error_outcome(
+                    self.name,
+                    reason=f"docker/ZAP exited with {scan_result.returncode}",
+                    returncode=scan_result.returncode,
+                    stderr=scan_result.stderr,
+                    duration=scan_result.duration_seconds,
+                )
+
+            parsed = parse_zap_report(report_bytes, target_host=target_host)
+            all_warnings: tuple[str, ...] = (
+                tuple(target_warnings) + parsed.warnings
+            )
+            return ScanOutcome(
+                scanner=self.name,
+                findings=parsed.findings,
+                warnings=all_warnings,
+                tool_version=parsed.zap_version,
+                duration_seconds=scan_result.duration_seconds,
+            )
+        finally:
+            # Step 5: tear down volume. Best-effort; if rm fails the
+            # operator can list orphans with
+            # ``docker volume ls -q --filter name=secscan-zap-``.
+            if volume_created:
+                try:
+                    rm_res = runner.run(
+                        _vol_remove_argv(volume_name),
+                        cwd=unit.root,
+                        timeout_seconds=30,
+                    )
+                    if rm_res.returncode != 0:
+                        import sys as _sys
+
+                        _sys.stderr.write(
+                            f"secscan: warning: failed to remove ZAP report "
+                            f"volume {volume_name!r}; remove manually with "
+                            f"`docker volume rm {volume_name}`\n"
+                        )
+                except Exception:
+                    # Defensive: ``runner.run`` is itself a subprocess
+                    # wrapper; if it raises (e.g. unforeseen OSError on
+                    # the rm path), we still want the scan result the
+                    # caller is waiting for. The operator can prune
+                    # leftover volumes with
+                    # ``docker volume prune --filter label=...``.
+                    pass
 
 
 def _resolve_dast_config(config: ScanConfig) -> DastConfig:

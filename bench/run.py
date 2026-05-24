@@ -31,6 +31,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import secrets as _secrets
 import shutil
 import subprocess
 import sys
@@ -603,9 +604,21 @@ def _run_semgrep_direct_count(fixture_dir: Path) -> int | None:
 # --- dast (optional) -------------------------------------------------------
 
 
+def _pick_free_port() -> int:
+    """Bind a localhost socket to port 0 to let the OS pick a free
+    port, then close it and return the port. There is a tiny race
+    window before docker binds the port — acceptable for a bench
+    run that nothing else competes with."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _bench_dast() -> FixtureResult:
     fixture_dir = SAFE_FIXTURE_ROOT / "dast" / "juice-shop"
-    if not fixture_dir.exists():
+    if not fixture_dir.exists() or not (fixture_dir / "expected.json").exists():
         return FixtureResult(
             scanner="dast",
             fixture_name="juice-shop",
@@ -613,6 +626,10 @@ def _bench_dast() -> FixtureResult:
             detected_count=0,
             skipped_reason="fixture not present",
         )
+    # Codex Phase 2-H diff review: route every fixture path that
+    # ends up in argv (including ``--path`` for secscan dast)
+    # through the safety gate.
+    fixture_dir = _assert_under_fixture_root(fixture_dir)
     if shutil.which("docker") is None:
         return FixtureResult(
             scanner="dast",
@@ -621,17 +638,155 @@ def _bench_dast() -> FixtureResult:
             detected_count=0,
             skipped_reason="docker not installed",
         )
-    # The juice-shop bring-up is left as documentation in
-    # bench/fixtures/dast/juice-shop/README.md — running it from this
-    # script would block the CI for many minutes. The expected.json
-    # captures alert pluginids that a manual run can compare against.
-    return FixtureResult(
-        scanner="dast",
-        fixture_name="juice-shop",
-        expected_count=0,
-        detected_count=0,
-        skipped_reason="run manually: see bench/fixtures/dast/juice-shop/README.md",
-    )
+
+    expected = _expected(fixture_dir)
+    pinning = expected.get("image_pinning", {})
+    juice_shop_image = pinning.get("juice_shop", "")
+    zap_image = pinning.get("zap", "")
+    expected_helper = pinning.get("helper", "")
+    if not juice_shop_image or not zap_image:
+        return FixtureResult(
+            scanner="dast",
+            fixture_name="juice-shop",
+            expected_count=0,
+            detected_count=0,
+            skipped_reason="image_pinning missing from expected.json",
+        )
+    # Codex Phase 2-H diff review: assert the expected.json helper
+    # digest matches the code constant. Drift means the test corpus
+    # and the production helper diverged — surface it loudly.
+    if expected_helper:
+        from secscan.scanners.dast.zap import HELPER_IMAGE
+
+        if expected_helper != HELPER_IMAGE:
+            return FixtureResult(
+                scanner="dast",
+                fixture_name="juice-shop",
+                expected_count=0,
+                detected_count=0,
+                skipped_reason=(
+                    f"helper image drift: expected.json has "
+                    f"{expected_helper!r} but code has {HELPER_IMAGE!r}"
+                ),
+            )
+
+    # Codex Phase 2-H diff review: randomize the container name so a
+    # second bench run (or a parallel one) doesn't collide on the
+    # fixed ``secscan-bench-juiceshop`` literal. Also pick a free
+    # port so the bench works alongside any other service the
+    # operator has running.
+    container_name = f"secscan-bench-juiceshop-{_secrets.token_hex(4)}"
+    host_port = _pick_free_port()
+    expected_findings = expected.get("expected_findings", [])
+    container_started = False
+    try:
+        # 1. Start Juice Shop in the background.
+        start = _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                container_name,
+                "-p",
+                f"127.0.0.1:{host_port}:3000",
+                "--",
+                juice_shop_image,
+            ],
+            timeout=180,
+        )
+        if start.returncode != 0:
+            return FixtureResult(
+                scanner="dast",
+                fixture_name="juice-shop",
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=(
+                    f"juice-shop start failed: "
+                    f"{start.stderr.decode('utf-8', errors='replace')[:120]}"
+                ),
+            )
+        container_started = True
+
+        # 2. Wait for Juice Shop to respond.
+        import socket
+        import time
+
+        deadline = time.monotonic() + 60
+        ready = False
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", host_port), timeout=1):
+                    ready = True
+                    break
+            except OSError:
+                time.sleep(1)
+        if not ready:
+            return FixtureResult(
+                scanner="dast",
+                fixture_name="juice-shop",
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason="juice-shop did not start within 60s",
+            )
+
+        # 3. Run secscan dast. The ZAP container reaches the host's
+        # mapped port via ``host.docker.internal`` (works on
+        # colima/Docker Desktop; native Linux has its own analogue).
+        argv = [
+            "secscan",
+            "dast",
+            "--target",
+            f"http://host.docker.internal:{host_port}/",
+            "--zap-image",
+            zap_image,
+            "--format",
+            "json",
+            "--fail-on",
+            "none",
+            "--no-color",
+            "--path",
+            str(fixture_dir),
+        ]
+        result = _run(argv, cwd=REPO_ROOT, timeout=900)
+        if not result.stdout:
+            return FixtureResult(
+                scanner="dast",
+                fixture_name="juice-shop",
+                expected_count=len(expected_findings),
+                detected_count=0,
+                skipped_reason=(
+                    "secscan dast returned no stdout: "
+                    + result.stderr.decode("utf-8", errors="replace")[:160]
+                ),
+            )
+        payload = json.loads(result.stdout.decode("utf-8"))
+        findings = payload.get("findings", [])
+
+        # 4. Match by pluginid.
+        rule_ids = {f.get("rule_id", "") for f in findings}
+        detected = sum(
+            1 for entry in expected_findings if entry["pluginid"] in rule_ids
+        )
+
+        return FixtureResult(
+            scanner="dast",
+            fixture_name="juice-shop",
+            expected_count=len(expected_findings),
+            detected_count=detected,
+            raw_finding_count=len(findings),
+            comparison_tool="zap-baseline",
+        )
+    finally:
+        # 5. Stop the Juice Shop container only if we successfully
+        # started it. Codex Phase 2-H diff review: avoid spurious
+        # ``Error: No such container`` warnings on the start-failure
+        # path.
+        if container_started:
+            _run(
+                ["docker", "stop", "--time", "5", container_name], timeout=30
+            )
 
 
 # ---------------------------------------------------------------------------

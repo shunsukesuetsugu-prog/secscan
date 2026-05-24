@@ -65,6 +65,17 @@
       "raw_finding_count": 7,
       "scanner": "sast",
       "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "zap-baseline",
+      "detected_count": 5,
+      "expected_count": 5,
+      "false_positive_count": 0,
+      "fixture_name": "juice-shop",
+      "raw_finding_count": 12,
+      "scanner": "dast",
+      "skipped_reason": null
     }
   ]
 }
