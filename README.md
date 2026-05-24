@@ -770,12 +770,15 @@ from 54.5% → 86.7% → **100%** by:
    DBs; secscan dedups, so a fair comparison must too).
 4. **Bundled secscan rules** (`secscan:extra` sentinel) shipping
    under `src/secscan/rules/` — Python `yaml.load` without
-   SafeLoader (CWE-502) and hard-coded credentials in named
-   variables (CWE-798), the two CWE categories the public
-   registry packs do not cover. The sentinel passes the
-   `_reject_unsafe_configs` safety gate (it points at our own
-   code, not user input) but is otherwise treated like any
-   path-based ruleset. Lifted Python SAST recall 50% → **100%**.
+   SafeLoader (CWE-502), hard-coded credentials in named
+   variables (CWE-798), MongoDB `$where`-template-string
+   injection (CWE-943, NodeGoat A1), and **template-engine
+   auto-escape disabled** (CWE-79, NodeGoat A3 — added post-
+   v0.17.0 after the comprehensive bench surfaced the gap).
+   The sentinel passes the `_reject_unsafe_configs` safety gate
+   (it points at our own code, not user input) but is otherwise
+   treated like any path-based ruleset. Lifted Python SAST
+   recall 50% → **100%** and NodeGoat external SAST 80% → **100%**.
 
 What's still scope-limited rather than a recall miss:
 
@@ -783,6 +786,22 @@ What's still scope-limited rather than a recall miss:
   fixtures stay clean, but they don't represent the full
   diversity of real source trees. Adding `p/security-audit` for
   even broader CWE coverage is opt-in via `[sast].semgrep_config`.
+- **CWE-287 (Broken Authentication)** is **fundamentally out
+  of scope for SAST** — the lab patterns (session management,
+  account lockout, password reset flow) are architectural and
+  not detectable by pattern matching. NodeGoat's
+  `bench/fixtures/external/nodegoat/expected.json` lists CWE-287
+  under `out_of_scope_cwes` with a pointer to the actual coverage
+  paths:
+  - **Dynamic auth-bypass sub-classes (CWE-306, 307, 384, 565)**
+    — covered by Phase 2-J DAST active mode (ZAP plugin 40038
+    "Bypassing 403", implemented in `bench/fixtures/dast/juice-
+    shop/expected.json` `expected_active_findings`) and Phase 2-P
+    IAST harness (pyrasp `ignored_auth` check).
+  - **Pure-policy sub-classes (CWE-521 password complexity,
+    CWE-613 session timeout)** — remain undetectable by every
+    scanner (no code pattern, no runtime observation surfaces
+    them).
 
 Phase 2-H added the DAST measurement (`bench/run.py --dast`).
 Lifecycle: bring up OWASP Juice Shop on `127.0.0.1:3000` →

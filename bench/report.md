@@ -1,12 +1,12 @@
 # secscan benchmark report
 
-_secscan 0.12.0_
+_secscan 0.17.0_
 
 ## Summary
 
-- Overall recall: **27/27 (100.0%)**
+- Overall recall: **76/76 (100.0%)**
 - Total false positives (clean fixtures): **0**
-- Fixtures run: 10, skipped: 0
+- Fixtures run: 22, skipped: 0
 - ≥ best single tool (integration parity): **4/4 fixtures**
 
 ## Per-fixture detail
@@ -23,6 +23,18 @@ _secscan 0.12.0_
 | config | dockerfile-vulnerable | 3 | 3 | 100.0% | 0 | trivy config | — | — |
 | config | k8s-vulnerable | 6 | 6 | 100.0% | 0 | trivy config | — | — |
 | config | terraform-vulnerable | 3 | 3 | 100.0% | 0 | trivy config | — | — |
+| dast | juice-shop | 5 | 5 | 100.0% | 0 | zap-baseline | — | — |
+| dast | webgoat | 6 | 6 | 100.0% | 0 | zap-baseline | — | — |
+| dast (authflow) | juice-shop | 5 | 5 | 100.0% | 0 | zap-baseline + auth header | — | — |
+| image | clean | 0 | 0 | 100.0% | 0 | trivy image | — | — |
+| image | vulnerable | 1 | 1 | 100.0% | 0 | trivy image | — | — |
+| sbom | clean | 0 | 0 | 100.0% | 0 | grype | — | — |
+| sbom | vulnerable | 3 | 3 | 100.0% | 0 | grype | — | — |
+| apifuzz | petstore3 | 4 | 4 | 100.0% | 0 | schemathesis (committed NDJSON) | — | — |
+| iast | pyrasp-flask-sample | 5 | 5 | 100.0% | 0 | pyrasp (committed NDJSON) | — | — |
+| external/secrets | gitleaks-corpus | 2 | 2 | 100.0% | 0 | gitleaks (own corpus) | — | — |
+| external/sast | nodegoat | 9 | 9 | 100.0% | 0 | — | — | — |
+| external/sast | pygoat | 9 | 9 | 100.0% | 0 | — | — | — |
 
 ## Methodology notes
 

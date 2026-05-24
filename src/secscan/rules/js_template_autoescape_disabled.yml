@@ -1,0 +1,65 @@
+# secscan bundled rule: template-engine auto-escape disabled.
+#
+# Phase 2-Q (post-v0.17.0 patch): NodeGoat's A3 XSS lab is rooted
+# in ``swig.setDefaults({ autoescape: false })`` in server.js. The
+# template later renders user-supplied memos via ``{{ marked(doc.
+# memo) }}`` — once auto-escape is off, every interpolated value
+# (not just marked() output) can carry raw HTML and is a stored
+# XSS sink.
+#
+# Public semgrep registry packs (``p/javascript``, ``p/owasp-top-
+# ten``, ``p/expressjs``) do NOT cover this pattern, so secscan
+# ships its own.
+#
+# The rule fires on the JS-side setup, not on template files —
+# semgrep doesn't scan .html / .njk / .mustache by default and
+# ``--include`` requires per-language tuning. Catching the
+# autoescape flip at config time gives us a stable, low-FP
+# fingerprint regardless of how many templates the app has.
+#
+# False-positive surface: there is no legitimate reason to
+# disable auto-escape *globally* in a web template engine. Tests
+# that need raw HTML output should mark individual fields with
+# the engine's ``safe`` filter, not flip the global default.
+# Codex Phase 2-Q design pin confirmed the recommendation.
+
+rules:
+  - id: secscan-js-template-autoescape-disabled
+    message: |
+      Template engine auto-escape is disabled globally. Any
+      ``{{ var }}`` in your templates will now emit raw HTML —
+      a stored XSS sink as soon as a user-controlled value flows
+      into the rendered page. CWE-79: Improper Neutralization of
+      Input During Web Page Generation. Re-enable auto-escape and
+      mark the *specific* fields that need raw HTML with the
+      engine's ``safe`` filter (``{{ var|safe }}`` in
+      Nunjucks/Jinja, etc.).
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      category: security
+      references:
+        - https://owasp.org/www-community/attacks/xss/
+        - https://github.com/OWASP/NodeGoat/blob/master/artifacts/lessons/A3-XSS.md
+    pattern-either:
+      # Swig (the engine NodeGoat ships with):
+      #   swig.setDefaults({ autoescape: false });
+      - patterns:
+          - pattern: |
+              $ENGINE.setDefaults({ ..., autoescape: false, ... })
+      # Nunjucks: the modern Swig successor.
+      #   nunjucks.configure(<path>, { autoescape: false })
+      #   new nunjucks.Environment(<loader>, { autoescape: false })
+      - patterns:
+          - pattern: |
+              nunjucks.configure(..., { ..., autoescape: false, ... })
+      - patterns:
+          - pattern: |
+              new nunjucks.Environment(..., { ..., autoescape: false, ... })
+      # Handlebars / Express handlebars: SafeString suppresses
+      # escaping for an entire response.
+      - patterns:
+          - pattern: |
+              new $H.SafeString($USER_INPUT)

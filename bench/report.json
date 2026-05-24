@@ -109,6 +109,138 @@
       "raw_finding_count": 13,
       "scanner": "config",
       "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "zap-baseline",
+      "detected_count": 5,
+      "expected_count": 5,
+      "false_positive_count": 0,
+      "fixture_name": "juice-shop",
+      "raw_finding_count": 11,
+      "scanner": "dast",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "zap-baseline",
+      "detected_count": 6,
+      "expected_count": 6,
+      "false_positive_count": 0,
+      "fixture_name": "webgoat",
+      "raw_finding_count": 14,
+      "scanner": "dast",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "zap-baseline + auth header",
+      "detected_count": 5,
+      "expected_count": 5,
+      "false_positive_count": 0,
+      "fixture_name": "juice-shop",
+      "raw_finding_count": 11,
+      "scanner": "dast (authflow)",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "trivy image",
+      "detected_count": 0,
+      "expected_count": 0,
+      "false_positive_count": 0,
+      "fixture_name": "clean",
+      "raw_finding_count": 0,
+      "scanner": "image",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "trivy image",
+      "detected_count": 1,
+      "expected_count": 1,
+      "false_positive_count": 0,
+      "fixture_name": "vulnerable",
+      "raw_finding_count": 1,
+      "scanner": "image",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "grype",
+      "detected_count": 0,
+      "expected_count": 0,
+      "false_positive_count": 0,
+      "fixture_name": "clean",
+      "raw_finding_count": 3,
+      "scanner": "sbom",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "grype",
+      "detected_count": 3,
+      "expected_count": 3,
+      "false_positive_count": 0,
+      "fixture_name": "vulnerable",
+      "raw_finding_count": 111,
+      "scanner": "sbom",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "schemathesis (committed NDJSON)",
+      "detected_count": 4,
+      "expected_count": 4,
+      "false_positive_count": 0,
+      "fixture_name": "petstore3",
+      "raw_finding_count": 38,
+      "scanner": "apifuzz",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "pyrasp (committed NDJSON)",
+      "detected_count": 5,
+      "expected_count": 5,
+      "false_positive_count": 0,
+      "fixture_name": "pyrasp-flask-sample",
+      "raw_finding_count": 6,
+      "scanner": "iast",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": "gitleaks (own corpus)",
+      "detected_count": 2,
+      "expected_count": 2,
+      "false_positive_count": 0,
+      "fixture_name": "gitleaks-corpus",
+      "raw_finding_count": 3,
+      "scanner": "external/secrets",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": null,
+      "detected_count": 9,
+      "expected_count": 9,
+      "false_positive_count": 0,
+      "fixture_name": "nodegoat",
+      "raw_finding_count": 34,
+      "scanner": "external/sast",
+      "skipped_reason": null
+    },
+    {
+      "comparison_count": null,
+      "comparison_tool": null,
+      "detected_count": 9,
+      "expected_count": 9,
+      "false_positive_count": 0,
+      "fixture_name": "pygoat",
+      "raw_finding_count": 141,
+      "scanner": "external/sast",
+      "skipped_reason": null
     }
   ]
 }

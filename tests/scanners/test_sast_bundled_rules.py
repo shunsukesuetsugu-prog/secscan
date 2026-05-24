@@ -183,6 +183,55 @@ class TestBundledRulesEndToEnd:
         results = self._run(fixture)
         assert results == [], results
 
+    def test_template_autoescape_disabled_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """Post-v0.17.0 rule: ``swig.setDefaults({autoescape: false})``
+        is the root cause of NodeGoat's A3 stored XSS lab. The bundled
+        rule must catch it."""
+        sample = tmp_path / "server.js"
+        sample.write_text(
+            'const swig = require("swig");\n'
+            'swig.setDefaults({ autoescape: false });\n'
+        )
+        results = self._run(sample)
+        rule_ids = {r["check_id"].split(".")[-1] for r in results}
+        assert "secscan-js-template-autoescape-disabled" in rule_ids
+
+    def test_template_autoescape_disabled_nunjucks_variant(
+        self, tmp_path: Path
+    ) -> None:
+        """Nunjucks is the modern Swig successor; the same rule
+        catches its equivalent flag flip."""
+        sample = tmp_path / "app.js"
+        sample.write_text(
+            'const nunjucks = require("nunjucks");\n'
+            'nunjucks.configure("./views", { autoescape: false });\n'
+        )
+        results = self._run(sample)
+        rule_ids = {r["check_id"].split(".")[-1] for r in results}
+        assert "secscan-js-template-autoescape-disabled" in rule_ids
+
+    def test_template_autoescape_TRUE_not_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        """The rule must fire ONLY on the false default. Code that
+        leaves auto-escape on (the secure default) must not be a
+        false positive."""
+        sample = tmp_path / "good.js"
+        sample.write_text(
+            'const swig = require("swig");\n'
+            'swig.setDefaults({ autoescape: true });\n'
+            'const nunjucks = require("nunjucks");\n'
+            'nunjucks.configure("./views", { autoescape: true });\n'
+        )
+        results = self._run(sample)
+        # The rule must not fire on autoescape: true.
+        rule_ids = {r["check_id"].split(".")[-1] for r in results}
+        assert (
+            "secscan-js-template-autoescape-disabled" not in rule_ids
+        ), results
+
     def test_no_findings_on_borderline_aws_lookalike(
         self, tmp_path: Path
     ) -> None:

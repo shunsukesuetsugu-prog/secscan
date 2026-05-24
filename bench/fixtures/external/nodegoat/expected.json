@@ -22,8 +22,7 @@
       "topic": "A1 SQL/NoSQL Injection (NodeGoat uses MongoDB ⇒ CWE-943 is the precise category)"
     },
     {"cwe": "CWE-95", "topic": "A1 Code Injection (eval)"},
-    {"cwe": "CWE-79", "topic": "A7 XSS"},
-    {"cwe": "CWE-287", "topic": "A2 Broken Authentication"},
+    {"cwe": "CWE-79", "topic": "A7 XSS (autoescape disabled → secscan custom rule)"},
     {"cwe": "CWE-319", "topic": "A3 Cleartext Transmission"},
     {"cwe": "CWE-352", "topic": "A8 CSRF / deserialization-adjacent"},
     {"cwe": "CWE-522", "topic": "A2/A3 Insufficient Credentials Protection"},
@@ -34,6 +33,10 @@
   "out_of_scope_cwes": [
     {"cwe": "CWE-611", "reason": "XXE; uncommon in Node.js default stack"},
     {"cwe": "CWE-1104", "reason": "vulnerable components; deps scanner scope, not SAST"},
-    {"cwe": "CWE-778", "reason": "insufficient logging; hard to detect statically"}
+    {"cwe": "CWE-778", "reason": "insufficient logging; hard to detect statically"},
+    {
+      "cwe": "CWE-287",
+      "reason": "Broken Authentication is fundamentally an architecture / workflow concern (session management, account lockout, password reset flow). NodeGoat's user-dao actually uses bcrypt correctly — the 'vulnerability' is at the auth-flow level, not the code-pattern level. SAST cannot detect this class. The dynamic-observation sub-classes (CWE-306/307/384/565) are covered by Phase 2-J DAST active mode (ZAP plugin 40038 'Bypassing 403') and Phase 2-P IAST harness (pyrasp 'ignored_auth' check). Pure-policy sub-classes (CWE-521 password complexity, CWE-613 session timeout) remain out-of-scope for every scanner."
+    }
   ]
 }
