@@ -107,8 +107,15 @@ missing — it never silently exits 0.
 ## Quick start
 
 ```sh
-# Scan everything secscan knows about.
+# Scan everything secscan knows about (parallel by default — Phase 2-X).
 secscan all --path .
+
+# Force serial execution when SIGINT responsiveness matters or for
+# easier debugging. Output is byte-identical between modes.
+secscan all --path . --no-parallel
+
+# Tune the parallel thread pool (default: min(cpu_count, scanners, 8)).
+secscan all --path . --max-workers 4
 
 # One scanner at a time.
 secscan secrets --path .

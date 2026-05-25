@@ -120,6 +120,7 @@ class SbomScanner(Scanner):
         "ensure the daemon is reachable. The Syft and Grype images are "
         "pulled on first use."
     )
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # SBOM scanning targets are explicit — registry-side or

@@ -132,6 +132,30 @@ def _build_parser() -> argparse.ArgumentParser:
                     "never included in 'secscan all' — see README.)"
                 ),
             )
+            # Phase 2-X: parallel orchestration knobs.
+            sub.add_argument(
+                "--no-parallel",
+                dest="parallel",
+                action="store_false",
+                default=True,
+                help=(
+                    "run scanners serially (default: parallel). "
+                    "Output is byte-identical between modes; this flag is "
+                    "a performance dial only. Useful for debugging or for "
+                    "downstream CI that depends on deterministic timing."
+                ),
+            )
+            sub.add_argument(
+                "--max-workers",
+                type=int,
+                default=None,
+                metavar="N",
+                help=(
+                    "cap the thread pool size for parallel scans. Default: "
+                    "min(cpu_count, plan_size, 8). Has no effect with "
+                    "--no-parallel. Must be >= 1."
+                ),
+            )
         if cmd == "config":
             sub.add_argument(
                 "--trivy-image",
@@ -803,6 +827,18 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
     scanners = _build_scanner_instances(config, command=args.command)
 
     runner = SubprocessCommandRunner()
+    # Phase 2-X: only ``secscan all`` accepts ``--no-parallel`` /
+    # ``--max-workers``. For single-scanner subcommands these
+    # attributes are absent on ``args``; default to serial mode for
+    # those (single-item plans are run serially regardless anyway,
+    # see orchestrator.run_scanners).
+    parallel = bool(getattr(args, "parallel", False))
+    max_workers = getattr(args, "max_workers", None)
+    if max_workers is not None and max_workers < 1:
+        _print_error(
+            f"--max-workers must be >= 1, got {max_workers}"
+        )
+        return int(ExitCode.SCAN_ERROR)
     try:
         outcome = run_scanners(
             scanners,
@@ -810,6 +846,8 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             config=config,
             runner=runner,
             only=only,
+            parallel=parallel,
+            max_workers=max_workers,
         )
     except BaselineError as exc:
         # We surface baseline errors at this level (parse failures during
@@ -925,11 +963,19 @@ def _baseline_accept(
     # safeguard — a missing DAST target must not crash baseline accept).
     scanners = _build_scanner_instances(config, command="baseline")
     runner = SubprocessCommandRunner()
+    # Codex Phase 2-X diff review MUST-FIX #4: baseline accept is
+    # an attended, audit-trail-producing operation. The benefit of
+    # parallel speedup here is small (single discovery, modest
+    # plan) and the cost of any non-determinism in error / warning
+    # ordering during a critical workflow outweighs it. Force the
+    # serial path; the parallel orchestrator's default-True does
+    # NOT apply to baseline.
     outcome = run_scanners(
         scanners,
         scan_root=resolve_scan_root(str(scan_root)),
         config=config,
         runner=runner,
+        parallel=False,
     )
 
     # Codex 12th review: refusing to accept when the scan was inconclusive

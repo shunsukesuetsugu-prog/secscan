@@ -110,6 +110,7 @@ class ApifuzzScanner(Scanner):
         "ensure the daemon is reachable. The Schemathesis image is "
         "pulled on first use."
     )
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # Apifuzz scans an external HTTP target — workspace-side

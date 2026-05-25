@@ -37,11 +37,36 @@ class Scanner(ABC):
 
     Subclasses set ``name`` (matches CLI subcommand / config section), and
     ``tool_executable`` (the external binary they invoke).
+
+    **Concurrency contract (Phase 2-X)**: ``scan()`` may be called
+    concurrently from multiple threads by the parallel orchestrator
+    (``secscan all`` default). A subclass implementation MUST be
+    thread-safe — i.e. it must not mutate shared instance state without
+    a lock, must not share file handles across calls without protection,
+    and must rely only on the per-call ``unit`` / ``runner`` / ``config``
+    inputs. ``CommandRunner`` instances passed in are documented to be
+    thread-safe; if a subclass needs additional shared state, it must
+    serialize access itself.
+
+    ``requires_docker`` informs the orchestrator's Docker-throttling
+    Semaphore (default cap: 2 simultaneous Docker scanners) so a fleet
+    of image/SBOM/Trivy invocations cannot starve the local daemon.
+    Conservatively set to True even for scanners that only *sometimes*
+    use Docker (e.g. ``SupplyScanner`` only uses cosign-in-Docker when
+    ``verify_images`` is configured) — the cost of an extra semaphore
+    slot when Docker isn't actually used is negligible compared to the
+    cost of a daemon overload.
     """
 
     name: ClassVar[str]
     tool_executable: ClassVar[str]
     install_hint: ClassVar[str]
+    #: Whether this scanner shells out to Docker. Used by the parallel
+    #: orchestrator to cap the number of concurrent Docker-using
+    #: scanners. Default False; override to True in scanners that
+    #: invoke ``docker run`` or otherwise contend for the local
+    #: Docker daemon.
+    requires_docker: ClassVar[bool] = False
 
     @abstractmethod
     def is_applicable(self, unit: WorkUnit) -> bool:
@@ -65,4 +90,8 @@ class Scanner(ABC):
         ``error`` populated. ``ToolNotFoundError`` is the one exception we do
         propagate — it's a configuration problem, not a scan failure, and
         the CLI translates it to exit code 2 with the install hint.
+
+        See the class docstring for the **concurrency contract** —
+        subclasses must be thread-safe when the parallel orchestrator
+        is in use.
         """

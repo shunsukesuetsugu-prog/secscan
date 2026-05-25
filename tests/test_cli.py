@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -53,10 +54,19 @@ def stub_gitleaks_installed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _ScriptedRunner:
-    """Replay canned CommandResults. Each .run() pops the next one."""
+    """Replay canned CommandResults. Each .run() pops the next one.
+
+    Thread-safe (Phase 2-X): the parallel orchestrator may call ``run()``
+    concurrently from multiple worker threads. The lock keeps the pop
+    operation race-free. Tests that depend on a specific *order* of
+    canned responses must still opt into serial execution via
+    ``--no-parallel`` — the lock only guarantees that each pop returns
+    a consistent item, not that calls arrive in the queued order.
+    """
 
     def __init__(self) -> None:
         self.responses: list[CommandResult] = []
+        self._lock = threading.Lock()
 
     def queue(
         self,
@@ -85,16 +95,17 @@ class _ScriptedRunner:
         env: Mapping[str, str] | None = None,
         timeout_seconds: int = 300,
     ) -> CommandResult:
-        if not self.responses:
-            return CommandResult(
-                argv=tuple(argv),
-                returncode=0,
-                stdout=b"",
-                stderr=b"",
-                duration_seconds=0.0,
-                timed_out=False,
-            )
-        canned = self.responses.pop(0)
+        with self._lock:
+            if not self.responses:
+                return CommandResult(
+                    argv=tuple(argv),
+                    returncode=0,
+                    stdout=b"",
+                    stderr=b"",
+                    duration_seconds=0.0,
+                    timed_out=False,
+                )
+            canned = self.responses.pop(0)
         # Phase 2-F: the secrets scanner switched from
         # ``--report-path=/dev/stdout`` (which gitleaks refuses on
         # macOS) to ``--report-path=<tempfile>``. To preserve the
@@ -205,7 +216,11 @@ def test_all_with_every_scanner_registered_clean(
     scripted_runner.queue(
         returncode=0, stdout=json.dumps({"results": [], "errors": []}).encode()
     )
-    rc = cli.main(["all", "--path", str(project)])
+    # Phase 2-X: ``--no-parallel`` matches the scripted runner's
+    # queue order to the secrets-then-sast call order. With the
+    # default parallel mode, those two scanners race for queue
+    # items and the canned responses can be misrouted.
+    rc = cli.main(["all", "--path", str(project), "--no-parallel"])
     out = capsys.readouterr().out
     assert rc == int(ExitCode.OK)
     assert "partial scan" not in out

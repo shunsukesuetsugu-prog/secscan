@@ -146,6 +146,7 @@ class DastScanner(Scanner):
         "install Docker (https://docs.docker.com/engine/install/) and ensure "
         "the daemon is reachable. The OWASP ZAP image is pulled on first use."
     )
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # DAST is per-deployment, not per-source-tree. The orchestrator

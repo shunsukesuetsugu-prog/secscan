@@ -13,7 +13,7 @@ build-backend = "hatchling.build"
 # so we ship under a personal namespace using the
 # maintainer's ``shun-`` prefix.
 name = "shun-secscan"
-version = "0.19.0"
+version = "0.20.0"
 description = "Cross-project vulnerability scanning CLI: dependency CVE, SAST, secrets, DAST, IAST, container, SBOM, API fuzz, and supply chain integrity — one entry point."
 readme = "README.md"
 requires-python = ">=3.11"

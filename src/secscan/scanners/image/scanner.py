@@ -75,6 +75,7 @@ class ImageScanner(Scanner):
         "ensure the daemon is reachable. The Trivy image is pulled on "
         "first use; the target images are pulled by Trivy."
     )
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # Image scanning is registry-side, not workspace-side. The

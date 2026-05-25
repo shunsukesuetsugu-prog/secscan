@@ -61,6 +61,13 @@ class CommandRunner(Protocol):
         - Surface timeouts via ``CommandResult.timed_out=True`` AND
           (by convention) a non-zero returncode, not by raising.
         - Return whatever stdout/stderr was captured before timeout.
+
+        **Concurrency contract (Phase 2-X)**: ``run()`` may be invoked
+        concurrently by the parallel orchestrator. Implementations
+        MUST be thread-safe — meaning ``run()`` calls must not share
+        mutable per-instance state without synchronisation. Custom
+        runners (e.g. test fakes that track invocation history) need
+        their own lock if they mutate shared state.
         """
         ...
 
@@ -70,6 +77,10 @@ class SubprocessCommandRunner:
 
     No shell, no command-string concatenation, no env inheritance shortcuts.
     The caller passes the exact ``argv`` list; we forward it untouched.
+
+    Thread-safe: each ``run()`` call constructs its own ``subprocess.run``
+    invocation and does not touch instance state, so concurrent use from
+    the parallel orchestrator is safe out of the box.
     """
 
     def run(

@@ -78,6 +78,13 @@ class SupplyScanner(Scanner):
         "use --verify-image. Lockfile consistency checks have no "
         "external tool dependency."
     )
+    # Codex Phase 2-X design review MUST-FIX #2: ``supply`` invokes
+    # cosign-in-Docker when ``verify_images`` is configured (see
+    # ``scan()`` below). Conservatively treat the scanner as
+    # Docker-gated so a parallel ``secscan all`` cannot oversubscribe
+    # the daemon. The cost when ``verify_images`` is empty is one
+    # Semaphore slot held briefly — negligible.
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         return True

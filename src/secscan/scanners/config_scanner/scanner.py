@@ -64,6 +64,7 @@ class ConfigScanner(Scanner):
         "ensure the daemon is reachable. The Trivy image is pulled on "
         "first use."
     )
+    requires_docker = True
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # Config scanning is path-based, not language-based. The

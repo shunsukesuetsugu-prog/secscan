@@ -14,10 +14,26 @@ should know about:
 
 Scanner errors do NOT abort the run. We collect them and continue so the
 operator sees every issue at once.
+
+Phase 2-X: scanners can run in parallel via a ThreadPoolExecutor.
+The default ``parallel=True`` mode runs scanners concurrently subject
+to:
+  - a global ``max_workers`` cap (default ``min(cpu_count, plan_size, 8)``),
+  - a Docker-scanner Semaphore (default 2) to keep the local Docker
+    daemon from being oversubscribed by ``image`` + ``sbom`` + ``apifuzz``
+    + ``config`` + ``dast`` + ``supply`` all firing at once.
+
+Aggregation is rebuilt in plan (= scanner discovery + unit) order so
+the resulting ``RunResult`` is byte-identical between serial and
+parallel modes (Codex Phase 2-X design review MUST-FIX #3). This makes
+``--no-parallel`` a strict performance dial, not a behaviour switch.
 """
 
 from __future__ import annotations
 
+import concurrent.futures as cf
+import os
+import threading
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -53,6 +69,135 @@ class OrchestratorResult:
     decision: PolicyDecision
 
 
+#: Default cap on simultaneous Docker-using scanners. The local Docker
+#: daemon serialises image pulls under the hood and CPU/IO contention
+#: from 5 parallel container starts costs more than it saves. 2 is the
+#: empirical sweet spot on a typical developer laptop; expose later if
+#: an operator needs to tune it.
+DEFAULT_DOCKER_MAX_WORKERS = 2
+
+#: Hard ceiling for the auto-resolved thread pool size. Even on 16-core
+#: hosts we don't want to spawn 16 subprocess scanners simultaneously —
+#: each scanner can be I/O-heavy on its own. Operators can override via
+#: ``--max-workers``.
+DEFAULT_MAX_WORKERS_CEILING = 8
+
+
+@dataclass(frozen=True)
+class _ItemResult:
+    """The per-(scanner, unit) outcome of one execution slot.
+
+    Parallel and serial paths both produce a list of these in plan order;
+    the aggregation step then interleaves them with the side-band
+    discovery warnings to recreate the original serial output ordering.
+    """
+
+    scanner_name: str
+    error: ScannerError | None
+    outcome: ScanOutcome | None  # None iff ``error`` is set
+
+
+def _execute_item(
+    scanner: Scanner,
+    unit: WorkUnit,
+    runner: CommandRunner,
+    scan_config: ScanConfig,
+    scan_root: ResolvedRoot,
+    docker_sem: threading.Semaphore | None = None,
+) -> _ItemResult:
+    """Run one (scanner, unit) pair, catching errors and sanitising paths.
+
+    When ``docker_sem`` is provided AND the scanner declares
+    ``requires_docker = True``, the call is gated on the semaphore so
+    no more than ``docker_max_workers`` Docker scanners run at once
+    (Phase 2-X). Serial mode passes ``docker_sem=None`` and skips the
+    gate entirely.
+
+    All exceptions are converted to ``ScannerError`` so a misbehaving
+    scanner cannot poison the parallel worker pool. ``ToolNotFoundError``
+    is treated as a normal scanner failure here (different from the
+    serial-only contract in earlier versions where it propagated) —
+    the per-thread futures need every exception caught locally.
+    """
+    if docker_sem is not None and scanner.requires_docker:
+        with docker_sem:
+            return _execute_item_inner(scanner, unit, runner, scan_config, scan_root)
+    return _execute_item_inner(scanner, unit, runner, scan_config, scan_root)
+
+
+def _execute_item_inner(
+    scanner: Scanner,
+    unit: WorkUnit,
+    runner: CommandRunner,
+    scan_config: ScanConfig,
+    scan_root: ResolvedRoot,
+) -> _ItemResult:
+    try:
+        outcome = scanner.scan(unit, runner, scan_config)
+    except ToolNotFoundError as exc:
+        return _ItemResult(
+            scanner_name=scanner.name,
+            error=ScannerError(
+                scanner=scanner.name,
+                reason=f"required tool not installed: {exc.tool}",
+                stderr_excerpt=exc.install_hint,
+                returncode=None,
+            ),
+            outcome=None,
+        )
+    except Exception as exc:
+        # Broad except: one misbehaving scanner must not abort the run.
+        # ``str(exc)`` may include scanned-file content / env values, so
+        # redact FIRST (so credential-shaped tokens are caught whole),
+        # then truncate.
+        safe_reason = truncate(
+            redact_text(f"scanner crashed: {type(exc).__name__}: {exc}"),
+            limit=300,
+        )
+        return _ItemResult(
+            scanner_name=scanner.name,
+            error=ScannerError(
+                scanner=scanner.name,
+                reason=safe_reason,
+                stderr_excerpt=None,
+                returncode=None,
+            ),
+            outcome=None,
+        )
+
+    # Codex Phase 2-X design review MUST-FIX #1: path sanitisation must
+    # happen in the worker, before returning the outcome to the
+    # aggregator. The previous loop-local sanitisation cannot be lost
+    # when execution moves into a thread pool.
+    sanitised = _sanitize_outcome_paths(outcome, scan_root, unit)
+    return _ItemResult(scanner_name=scanner.name, error=None, outcome=sanitised)
+
+
+def _resolve_max_workers(requested: int | None, n_scanners: int) -> int:
+    """Compute the effective ThreadPoolExecutor size.
+
+    Cap is keyed off ``n_scanners`` (= ``len(selected)``), NOT plan
+    size. Within a single scanner, per-unit subprocess calls usually
+    contend for the same external tool / Docker daemon, so over-
+    provisioning beyond ``len(selected)`` workers spends threads
+    without buying parallelism (Codex Phase 2-X diff review
+    MUST-FIX #2).
+
+    - ``requested=None`` → ``min(cpu_count or 4, n_scanners, ceiling=8)``.
+    - ``requested>=1``   → ``min(requested, n_scanners)``.
+
+    Codex Phase 2-X design review MUST-FIX #6 covered ``--max-workers``
+    validation (>= 1); the caller enforces that before reaching here.
+    The ``max(1, ...)`` guard keeps the executor argument valid even
+    when called with zero selected scanners (defensive — the caller
+    already short-circuits empty plans).
+    """
+    n_scanners = max(1, n_scanners)
+    if requested is None:
+        return min(os.cpu_count() or 4, n_scanners, DEFAULT_MAX_WORKERS_CEILING)
+    return min(requested, n_scanners)
+
+
 def run_scanners(
     scanners: list[Scanner],
     *,
@@ -60,6 +205,9 @@ def run_scanners(
     config: ProjectConfig,
     runner: CommandRunner,
     only: tuple[str, ...] | None = None,
+    parallel: bool = True,
+    max_workers: int | None = None,
+    docker_max_workers: int = DEFAULT_DOCKER_MAX_WORKERS,
 ) -> OrchestratorResult:
     """Execute the requested scanners and aggregate results.
 
@@ -67,7 +215,41 @@ def run_scanners(
     a single subcommand). ``config.skip`` further removes scanners from the
     plan. ``only`` always wins over skip — if the user explicitly asked for
     ``secscan secrets``, we run secrets regardless of skip config.
+
+    Phase 2-X parallel knobs:
+
+    - ``parallel`` (default True): run scanners in a ThreadPoolExecutor.
+      Scanners are I/O bound (subprocess.run), so threads suffice; no
+      asyncio rewrite required.
+    - ``max_workers`` (default None → auto): cap on total simultaneous
+      scanner subprocesses. ``None`` resolves to
+      ``min(cpu_count or 4, plan_size, 8)``.
+    - ``docker_max_workers`` (default 2): cap on simultaneous Docker
+      scanners specifically. Independent of ``max_workers`` so a large
+      thread pool can still serialise the heavy ``docker run`` workers.
+
+    Both modes produce **byte-identical RunResult** for the same input —
+    parallel just runs faster. The serial path is preserved as a fallback
+    for debugging and downstream-CI compatibility.
+
+    **Known limitation (Phase 2-X v1, Codex Phase 2-X diff review
+    follow-up)**: a ``KeyboardInterrupt`` raised while parallel
+    scanners are mid-``subprocess.run`` returns control out of
+    ``run_scanners()`` promptly (the executor is shut down with
+    ``cancel_futures=True, wait=False``), but the interpreter's
+    atexit hook will then wait for any non-daemon executor worker
+    threads to finish their in-flight subprocess before the CLI
+    process actually exits. Operators who need immediate SIGINT
+    responsiveness should run with ``--no-parallel`` until Phase
+    2-Y adds runner-level subprocess termination.
     """
+    if max_workers is not None and max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1, got {max_workers}")
+    if docker_max_workers < 1:
+        raise ValueError(
+            f"docker_max_workers must be >= 1, got {docker_max_workers}"
+        )
+
     findings: list[Finding] = []
     errors: list[ScannerError] = []
     warnings: list[str] = []
@@ -78,16 +260,25 @@ def run_scanners(
     selected = _select_scanners(scanners, only=only, skip=config.skip)
     skipped.extend(s.name for s in scanners if s not in selected)
 
-    for scanner in selected:
+    # Build the plan: list of (scanner_index, scanner, unit, scan_config).
+    # ``scanner_index`` keys aggregation by *instance* identity, not
+    # ``scanner.name`` — Codex Phase 2-X diff review MUST-FIX #3: two
+    # scanner instances sharing a ``name`` (workspace edge case) would
+    # otherwise have their results double-replayed during merge.
+    # Discovery warnings carry the same index so the per-instance
+    # output order matches the serial loop exactly.
+    plan: list[tuple[int, Scanner, WorkUnit, ScanConfig]] = []
+    discovery_warnings: list[tuple[int, tuple[str, ...]]] = []
+    for sidx, scanner in enumerate(selected):
         scan_config = _scan_config_for(scanner.name, config)
         discovery = discover_for_scanner(scanner.name, scan_root)
-        warnings.extend(discovery.warnings)
+        discovery_warnings.append((sidx, tuple(discovery.warnings)))
 
         applicable = [u for u in discovery.work_units if scanner.is_applicable(u)]
         if not applicable:
             # Discovery returned nothing the scanner can use (e.g. deps with
-            # no manifests). Don't treat as skipped, just no findings; the
-            # discovery warning already informs the user.
+            # no manifests). Don't treat as skipped — the discovery warning
+            # already informs the user.
             continue
 
         # We are about to call scanner.scan() at least once. Record the
@@ -95,46 +286,77 @@ def run_scanners(
         # run for it (Codex 18th review).
         scanned.append(scanner.name)
         for unit in applicable:
-            try:
-                outcome = scanner.scan(unit, runner, scan_config)
-            except ToolNotFoundError as exc:
-                errors.append(
-                    ScannerError(
-                        scanner=scanner.name,
-                        reason=f"required tool not installed: {exc.tool}",
-                        stderr_excerpt=exc.install_hint,
-                        returncode=None,
-                    )
-                )
-                continue
-            except Exception as exc:
-                # We intentionally catch broad exceptions: a single mis-
-                # behaving scanner must not kill the whole run.
-                # ``str(exc)`` may include scanned-file content / env values,
-                # so redact FIRST (so credential-shaped values are caught
-                # whole), then truncate.
-                safe_reason = truncate(
-                    redact_text(f"scanner crashed: {type(exc).__name__}: {exc}"),
-                    limit=300,
-                )
-                errors.append(
-                    ScannerError(
-                        scanner=scanner.name,
-                        reason=safe_reason,
-                        stderr_excerpt=None,
-                        returncode=None,
-                    )
-                )
-                continue
+            plan.append((sidx, scanner, unit, scan_config))
 
-            # Verify all reported file paths are inside the scan root.
-            # External tools can be tricked or buggy; we don't display paths
-            # we can't vouch for. Sanitization is WorkUnit-aware (Phase 2-B
-            # / Codex 20th review): a relative path returned by a workspace
-            # scanner is resolved against ``unit.root``, not ``scan_root``,
-            # so monorepo members report repo-root-relative paths.
-            outcome = _sanitize_outcome_paths(outcome, scan_root, unit)
+    # Execute the plan. Both modes produce ``results`` in plan order.
+    # A single-item plan stays serial regardless of ``parallel`` —
+    # ThreadPoolExecutor overhead would dominate the work.
+    if parallel and len(plan) > 1:
+        effective_workers = _resolve_max_workers(max_workers, len(selected))
+        docker_sem = threading.Semaphore(docker_max_workers)
+        results_by_idx: dict[int, _ItemResult] = {}
+        ex = cf.ThreadPoolExecutor(max_workers=effective_workers)
+        # Codex Phase 2-X diff review MUST-FIX #1: an implicit
+        # ``with ex: ...`` block would call ``shutdown(wait=True)``
+        # on any exception, including KeyboardInterrupt — meaning
+        # ``run_scanners()`` would block inside the executor exit
+        # path until every in-flight subprocess finishes. Manage
+        # shutdown explicitly: on clean exit wait normally, on any
+        # exception cancel pending futures and return fast.
+        #
+        # NOTE (Phase 2-X v1 limitation, see top-of-function
+        # docstring): this returns control out of ``run_scanners()``
+        # promptly, but CPython 3.11's ``ThreadPoolExecutor`` worker
+        # threads are non-daemon, so the interpreter's atexit hook
+        # still waits for currently-running ``subprocess.run`` calls
+        # to finish before the process exits. Operators who need
+        # immediate SIGINT responsiveness should use
+        # ``--no-parallel``. A future phase will add runner-level
+        # subprocess tracking so the CLI can kill in-flight scanner
+        # subprocesses on shutdown.
+        try:
+            future_to_idx = {
+                ex.submit(
+                    _execute_item, s, u, runner, c, scan_root, docker_sem
+                ): idx
+                for idx, (_sidx, s, u, c) in enumerate(plan)
+            }
+            # ``as_completed`` lets us observe finish order for any future
+            # logging; the actual aggregation re-sorts by plan index.
+            for fut in cf.as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                results_by_idx[idx] = fut.result()
+            ex.shutdown(wait=True)
+        except BaseException:
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
+        results = [results_by_idx[i] for i in range(len(plan))]
+    else:
+        # Serial path: no executor overhead, in-order execution.
+        results = [
+            _execute_item(s, u, runner, c, scan_root)
+            for _sidx, s, u, c in plan
+        ]
 
+    # Aggregate in the original scanner-by-scanner order:
+    # discovery_warnings(A) → outcomes(A's units) → discovery_warnings(B) → ...
+    # This is the byte-identical-with-serial output guarantee.
+    # Codex Phase 2-X diff review MUST-FIX #3: key by scanner *instance
+    # index*, not name, so duplicate-named scanner instances don't
+    # cause double-replay.
+    results_by_sidx: dict[int, list[_ItemResult]] = {}
+    for plan_idx, (sidx, _scanner, _unit, _cfg) in enumerate(plan):
+        results_by_sidx.setdefault(sidx, []).append(results[plan_idx])
+
+    for sidx, disc_warns in discovery_warnings:
+        warnings.extend(disc_warns)
+        for item in results_by_sidx.get(sidx, ()):
+            if item.error is not None:
+                errors.append(item.error)
+                continue
+            outcome = item.outcome
+            if outcome is None:
+                continue
             _accumulate(
                 outcome,
                 findings=findings,
