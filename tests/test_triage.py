@@ -355,6 +355,34 @@ def test_duplicate_fingerprints_do_not_cross_contaminate(
     assert out.findings[1].ai_triage.classification is AiClassification.FALSE_POSITIVE  # type: ignore[union-attr]
 
 
+def test_opencode_not_installed_degrades_gracefully(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When opencode is NOT installed (FileNotFoundError from subprocess),
+    triage must NOT crash the scan: every finding becomes needs-review and
+    a single backend warning is emitted. This is the guarantee that
+    secscan stays fully usable in environments without opencode — only
+    --triage degrades, the scan itself completes."""
+
+    def _raise_not_found(prompt: str, *, model: str, timeout_seconds: int):
+        raise FileNotFoundError("opencode: command not found")
+
+    monkeypatch.setattr(triage, "_call_opencode", _raise_not_found)
+    root = resolve_scan_root(str(tmp_path))
+    out = triage.triage_findings(
+        RunResult(findings=(_finding("fp1"), _finding("fp2"))),
+        scan_root=root,
+        workers=2,
+    )
+    # No exception, findings preserved, all needs-review, one warning.
+    assert len(out.findings) == 2
+    assert all(
+        f.ai_triage.classification is AiClassification.NEEDS_REVIEW  # type: ignore[union-attr]
+        for f in out.findings
+    )
+    assert any("backend call(s) failed" in w for w in out.warnings)
+
+
 def test_backend_nonzero_exit_warns_and_needs_review(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
