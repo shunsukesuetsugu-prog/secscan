@@ -1067,3 +1067,134 @@ def test_all_since_passes_ref_to_resolver_and_runs_diff(
     assert "DIFF SCAN since release-1.0" in out
     # Clean diff scan with secrets running exits OK.
     assert rc == int(ExitCode.OK)
+
+
+# --- Phase 2-Z: --triage wiring --------------------------------------------
+
+_TRIAGE_LEAK_JSON = json.dumps(
+    [
+        {
+            "RuleID": "generic-api-key",
+            "Description": "Generic API Key",
+            "StartLine": 1,
+            "EndLine": 1,
+            "StartColumn": 1,
+            "EndColumn": 10,
+            "Match": "REDACTED",
+            "Secret": "REDACTED",
+            "File": "config.py",
+            "Fingerprint": "config.py:generic-api-key:1",
+        }
+    ]
+).encode()
+
+
+def test_all_triage_annotates_findings(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--triage routes findings through the AI post-processor and the
+    verdict shows up in the report. The opencode call is mocked."""
+    import re
+
+    from secscan import triage
+
+    def _fake(prompt: str, *, model: str, timeout_seconds: int) -> tuple[int, str]:
+        m = re.search(r"fingerprint: (\S+)", prompt)
+        fp = m.group(1) if m else "x"
+        return (
+            0,
+            f'{{"fingerprint":"{fp}","classification":"false-positive",'
+            '"rationale":"looks like a placeholder"}',
+        )
+
+    monkeypatch.setattr(triage, "_call_opencode", _fake)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    # secrets finds one leak (exit 101) + version probe.
+    scripted_runner.queue(returncode=101, stdout=_TRIAGE_LEAK_JSON)
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    cli.main(
+        [
+            "all",
+            "--path",
+            str(project),
+            "--triage",
+            "--skip",
+            "sast",
+            "--skip",
+            "supply",
+            "--no-parallel",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "AI triage: false-positive" in out
+
+
+def test_all_triage_max_zero_rejected(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    rc = cli.main(["all", "--path", str(project), "--triage", "--triage-max", "0"])
+    err = capsys.readouterr().err
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "triage-max must be >= 1" in err
+
+
+def test_all_triage_in_ci_requires_yes(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Codex diff review #3: --triage in CI without --triage-yes is a hard
+    error (no silent cloud egress in a pipeline)."""
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    monkeypatch.setenv("SECSCAN_CI", "1")  # secscan CI gate
+    rc = cli.main(["all", "--path", str(project), "--triage"])
+    err = capsys.readouterr().err
+    assert rc == int(ExitCode.SCAN_ERROR)
+    assert "triage-yes" in err
+
+
+def test_all_triage_in_ci_with_yes_proceeds(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With --triage-yes, CI egress is confirmed and the run proceeds."""
+    import re
+
+    from secscan import triage
+
+    def _fake(prompt: str, *, model: str, timeout_seconds: int) -> tuple[int, str]:
+        m = re.search(r"fingerprint: (\S+)", prompt)
+        fp = m.group(1) if m else "x"
+        return (0, f'{{"fingerprint":"{fp}","classification":"real","rationale":"r"}}')
+
+    monkeypatch.setattr(triage, "_call_opencode", _fake)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    monkeypatch.setenv("SECSCAN_CI", "1")
+    scripted_runner.queue(returncode=101, stdout=_TRIAGE_LEAK_JSON)
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    rc = cli.main(
+        [
+            "all",
+            "--path",
+            str(project),
+            "--triage",
+            "--triage-yes",
+            "--skip",
+            "sast",
+            "--skip",
+            "supply",
+            "--no-parallel",
+        ]
+    )
+    out = capsys.readouterr().out
+    # Proceeded (not a SCAN_ERROR from the CI guard) and annotated.
+    assert rc != int(ExitCode.SCAN_ERROR)
+    assert "AI triage: real" in out

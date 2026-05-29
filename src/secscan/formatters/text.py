@@ -142,6 +142,16 @@ def _render_finding(finding: Finding, options: FormatOptions) -> list[str]:
             lines.append(_dim(f"      at {' / '.join(loc_parts)}", options))
     if finding.fix_version:
         lines.append(_dim(f"      fix available in: {finding.fix_version}", options))
+    # Phase 2-Z: AI triage verdict (advisory). Shown inline so a human can
+    # prioritise; it never changed the severity or pass/fail above.
+    if finding.ai_triage is not None:
+        verdict = finding.ai_triage.classification.value
+        lines.append(
+            _dim(
+                f"      AI triage: {verdict} — {finding.ai_triage.rationale}",
+                options,
+            )
+        )
     if options.verbose:
         msg = finding.message
         if msg and msg != finding.title:

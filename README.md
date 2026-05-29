@@ -126,6 +126,16 @@ secscan all --path . --since origin/main
 # NOTE: a delta check is NOT a full audit — unchanged files are not
 # scanned by secrets/sast. Run a full scan before release.
 
+# AI triage (Phase 2-Z): classify each finding real / false-positive /
+# needs-review via a cloud LLM (opencode), to cut the noise of large
+# finding sets. ADVISORY ONLY — never changes the exit code or drops a
+# finding; the verdict is an annotation a human uses to prioritise.
+secscan all --path . --since origin/main --triage
+#   - sends finding metadata + a REDACTED ±3-line code snippet per finding
+#   - each finding triaged in isolation (no cross-contamination)
+#   - in CI, add --triage-yes to confirm cloud egress
+#   - tune: --triage-max N (skip if more), --triage-workers N, --triage-model
+
 # One scanner at a time.
 secscan secrets --path .
 secscan deps    --path .

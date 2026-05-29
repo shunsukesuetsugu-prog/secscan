@@ -39,9 +39,9 @@ from .config import ConfigError, ProjectConfig, load_config
 from .exit_codes import ExitCode
 from .formatters import FormatOptions, format_for
 from .formatters.base import known_format_names
-from .models import Severity
+from .models import RunResult, Severity
 from .orchestrator import run_scanners
-from .path_safety import PathSafetyError, resolve_scan_root
+from .path_safety import PathSafetyError, ResolvedRoot, resolve_scan_root
 from .runner import SubprocessCommandRunner
 from .scanners.apifuzz import ApifuzzScanner
 from .scanners.base import Scanner
@@ -169,6 +169,62 @@ def _build_parser() -> argparse.ArgumentParser:
                     "DB, not file changes); dast/image/apifuzz/config/sbom "
                     "are SKIPPED. This is a delta check, NOT a full audit — "
                     "unchanged files are not scanned by secrets/sast."
+                ),
+            )
+            # Phase 2-Z: AI triage (opt-in). Sends finding metadata +
+            # redacted code snippets to a cloud LLM (opencode) to classify
+            # each finding real / false-positive / needs-review. The verdict
+            # is an ADVISORY ANNOTATION only — it never changes the pass/fail
+            # decision or removes a finding.
+            sub.add_argument(
+                "--triage",
+                action="store_true",
+                default=False,
+                help=(
+                    "AI-triage findings via a cloud LLM (opencode): annotate "
+                    "each as real / false-positive / needs-review. ADVISORY "
+                    "ONLY — never changes exit code or drops findings. Sends "
+                    "redacted code snippets to the cloud; opt-in by this flag."
+                ),
+            )
+            sub.add_argument(
+                "--triage-max",
+                type=int,
+                default=None,
+                metavar="N",
+                help=(
+                    "skip AI triage entirely if more than N findings "
+                    "(default 50) — avoids a huge cloud bill / rate-limits. "
+                    "Narrow with --since to triage a smaller set."
+                ),
+            )
+            sub.add_argument(
+                "--triage-workers",
+                type=int,
+                default=None,
+                metavar="N",
+                help=(
+                    "max concurrent triage LLM calls (default 4). Independent "
+                    "of --max-workers. Keep modest to avoid cloud rate limits."
+                ),
+            )
+            sub.add_argument(
+                "--triage-model",
+                default=None,
+                metavar="MODEL",
+                help=(
+                    "opencode model for triage (default "
+                    "opencode-go/kimi-k2.6). Format: provider/model."
+                ),
+            )
+            sub.add_argument(
+                "--triage-yes",
+                action="store_true",
+                default=False,
+                help=(
+                    "confirm cloud egress for --triage in a CI environment. "
+                    "Interactive shells don't need this; CI does, so a "
+                    "pipeline can't silently start shipping code to an LLM."
                 ),
             )
         if cmd == "config":
@@ -855,6 +911,31 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
         )
         return int(ExitCode.SCAN_ERROR)
 
+    # Phase 2-Z: validate triage knobs up front (usage errors).
+    triage_max = getattr(args, "triage_max", None)
+    if triage_max is not None and triage_max < 1:
+        _print_error(f"--triage-max must be >= 1, got {triage_max}")
+        return int(ExitCode.SCAN_ERROR)
+    triage_workers = getattr(args, "triage_workers", None)
+    if triage_workers is not None and triage_workers < 1:
+        _print_error(f"--triage-workers must be >= 1, got {triage_workers}")
+        return int(ExitCode.SCAN_ERROR)
+    # Codex Phase 2-Z diff review #3: --triage ships redacted code snippets
+    # to a cloud LLM. In a CI environment that egress must be explicitly
+    # confirmed with --triage-yes, so a pipeline can't start exfiltrating
+    # code the moment someone adds --triage. Interactive shells are exempt
+    # (the operator is right there and opted in by typing --triage).
+    if (
+        getattr(args, "triage", False)
+        and is_ci_environment()
+        and not getattr(args, "triage_yes", False)
+    ):
+        _print_error(
+            "--triage sends redacted code snippets to a cloud LLM; in a CI "
+            "environment you must add --triage-yes to confirm this egress."
+        )
+        return int(ExitCode.SCAN_ERROR)
+
     # Phase 2-Y: resolve the diff baseline when --since was given. This
     # validates all diff-mode preconditions (repo-root, clean worktree,
     # ref resolves) and normalises to a merge-base OID. A DiffScanError
@@ -939,6 +1020,13 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
         final_decision = _replace(outcome.decision, exit_code=ExitCode.SCAN_ERROR)
     else:
         final_decision = outcome.decision
+
+    # Phase 2-Z: AI triage post-processing. Runs AFTER the policy
+    # decision is final — triage is advisory and must NEVER change the
+    # exit code or drop findings (Codex Phase 2-Z design review #4). It
+    # only annotates final_result.findings with AI verdicts.
+    if getattr(args, "triage", False):
+        final_result = _apply_ai_triage(args, final_result, scan_root)
 
     # format_name / quiet were already validated at the top of this
     # function before scanners ran (Codex 18th review).
@@ -1493,3 +1581,55 @@ def _should_use_color(args: argparse.Namespace, stream: object) -> bool:
 
 def _print_error(message: str) -> None:
     sys.stderr.write(f"secscan: error: {message}\n")
+
+
+def _apply_ai_triage(
+    args: argparse.Namespace,
+    result: RunResult,
+    scan_root: ResolvedRoot,
+) -> RunResult:
+    """Phase 2-Z: annotate findings with AI triage verdicts (advisory).
+
+    NEVER raises and NEVER changes the policy decision — a triage failure
+    is downgraded to a warning and the findings are returned unannotated.
+    Triage is applied only after the decision is already final.
+    """
+    from .triage import (
+        DEFAULT_TRIAGE_MAX,
+        DEFAULT_TRIAGE_MODEL,
+        DEFAULT_TRIAGE_TIMEOUT_SECONDS,
+        DEFAULT_TRIAGE_WORKERS,
+        triage_findings,
+    )
+
+    n = len(result.findings)
+    if n == 0:
+        return result
+    model = getattr(args, "triage_model", None) or DEFAULT_TRIAGE_MODEL
+    max_findings = getattr(args, "triage_max", None) or DEFAULT_TRIAGE_MAX
+    workers = getattr(args, "triage_workers", None) or DEFAULT_TRIAGE_WORKERS
+    # Egress notice (informational — --triage is the explicit opt-in).
+    sys.stderr.write(
+        f"secscan: --triage will send metadata + redacted code snippets of "
+        f"{n} finding(s) to the cloud LLM ({model}) via opencode.\n"
+    )
+    try:
+        return triage_findings(
+            result,
+            scan_root=scan_root,
+            model=model,
+            max_findings=max_findings,
+            workers=workers,
+            timeout_seconds=DEFAULT_TRIAGE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        # A triage backend failure must never abort the run or change the
+        # exit code (Codex Phase 2-Z design review #4). Warn and return
+        # the findings unannotated.
+        from .redact import redact_text, truncate
+
+        safe = truncate(
+            redact_text(f"AI triage failed: {type(exc).__name__}: {exc}"), 200
+        )
+        sys.stderr.write(f"secscan: warning: {safe}\n")
+        return result

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from pathlib import Path
 from types import MappingProxyType
 
@@ -57,6 +57,42 @@ class Severity(IntEnum):
             return cls[normalized]
         except KeyError as exc:
             raise ValueError(f"Unknown severity name: {name!r}") from exc
+
+
+class AiClassification(Enum):
+    """Phase 2-Z: an AI triage verdict for a finding.
+
+    ``REAL`` — the LLM judged the finding a genuine issue.
+    ``FALSE_POSITIVE`` — the LLM judged it a likely false alarm.
+    ``NEEDS_REVIEW`` — the LLM was unsure, OR the call failed / timed
+    out / returned malformed output / could not be reconciled to the
+    requested fingerprint. This is the SAFE default: anything we cannot
+    confidently classify lands here, never silently as FALSE_POSITIVE.
+    """
+
+    REAL = "real"
+    FALSE_POSITIVE = "false-positive"
+    NEEDS_REVIEW = "needs-review"
+
+
+@dataclass(frozen=True)
+class AiTriage:
+    """An advisory AI triage annotation attached to a Finding (Phase 2-Z).
+
+    This is ANNOTATION ONLY. It never changes the finding's severity,
+    fingerprint, baseline matching, sort order, or the pass/fail policy
+    decision — it is human-triage assistance. The field on ``Finding``
+    is declared ``compare=False, hash=False`` so AI text cannot perturb
+    finding identity (Codex Phase 2-Z design review #5).
+    """
+
+    classification: AiClassification
+    rationale: str
+    """A short, model-supplied justification. Treated as untrusted text:
+    rendered as-is in reports but never parsed for control flow."""
+    model: str
+    """The backend model that produced this verdict (e.g.
+    ``opencode-go/kimi-k2.6``), for audit / reproducibility notes."""
 
 
 @dataclass(frozen=True)
@@ -145,6 +181,14 @@ class Finding:
     SARIF "partial fingerprints" remain deterministic across runs.
     """
     raw: dict[str, object] | None = field(default=None, hash=False, compare=False)
+
+    ai_triage: AiTriage | None = field(default=None, hash=False, compare=False)
+    """Phase 2-Z: optional AI triage annotation. ``compare=False,
+    hash=False`` is REQUIRED — finding identity (equality, ``__hash__``,
+    and therefore baseline dedup) must remain driven by the structured
+    fields, never by advisory AI text (Codex Phase 2-Z design review
+    #5). Populated only by the opt-in ``--triage`` post-processor;
+    ``None`` in every normal run."""
 
 
 @dataclass(frozen=True)

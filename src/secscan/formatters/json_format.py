@@ -95,7 +95,7 @@ def _finding(finding: Finding) -> dict[str, Any]:
             "ecosystem": loc.ecosystem,
             "url": loc.url,
         }
-    return {
+    payload: dict[str, Any] = {
         "scanner": finding.scanner,
         "rule_id": finding.rule_id,
         "severity": finding.severity.name.lower(),
@@ -109,6 +109,16 @@ def _finding(finding: Finding) -> dict[str, Any]:
         "references": list(finding.references),
         "tool_version": finding.tool_version,
     }
+    # Phase 2-Z: additive opt-in field. Present ONLY when AI triage ran
+    # (--triage); absent otherwise, so existing JSON v1 consumers that
+    # never used --triage see an unchanged shape (Codex design review #6).
+    if finding.ai_triage is not None:
+        payload["ai_triage"] = {
+            "classification": finding.ai_triage.classification.value,
+            "rationale": finding.ai_triage.rationale,
+            "model": finding.ai_triage.model,
+        }
+    return payload
 
 
 def _error(err: object) -> dict[str, Any]:
