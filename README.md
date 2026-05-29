@@ -117,6 +117,15 @@ secscan all --path . --no-parallel
 # Tune the parallel thread pool (default: min(cpu_count, scanners, 8)).
 secscan all --path . --max-workers 4
 
+# Differential scan (Phase 2-Y): only what changed since a git ref.
+# Fast PR/CI checks. Requires a CLEAN tree and that --path is the repo root.
+secscan all --path . --since origin/main
+#   secrets/sast  → true delta scans (gitleaks range / semgrep baseline)
+#   deps/supply   → FULL scan (their CVEs come from an advisory DB)
+#   dast/image/apifuzz/config/sbom → skipped (not diff-aware)
+# NOTE: a delta check is NOT a full audit — unchanged files are not
+# scanned by secrets/sast. Run a full scan before release.
+
 # One scanner at a time.
 secscan secrets --path .
 secscan deps    --path .

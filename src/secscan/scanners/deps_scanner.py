@@ -31,7 +31,7 @@ from ..models import (
 )
 from ..redact import redact_text, truncate
 from ..runner import CommandResult, CommandRunner, decode_output
-from .base import Scanner, ToolNotFoundError
+from .base import DiffMode, Scanner, ToolNotFoundError
 from .deps.npm import (
     build_findings_from_npm_audit,
     classify_npm_audit_exit,
@@ -73,6 +73,12 @@ class DepsScanner(Scanner):
         "install the relevant package manager(s): npm v7+, pnpm v8+, "
         "and/or pip-audit (`pip install pip-audit` or `secscan[deps]`)"
     )
+    # Phase 2-Y: deps CVEs come from an advisory database, not from
+    # file content. An UNCHANGED dependency can become vulnerable when
+    # a new advisory lands. So deps always runs a FULL scan in diff
+    # mode (Codex Phase 2-Y design review #4 — gating on "lockfile
+    # changed?" would be a false-negative trap).
+    diff_mode: ClassVar[DiffMode] = DiffMode.ALWAYS
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         return unit.ecosystem in _SUPPORTED_ECOSYSTEMS

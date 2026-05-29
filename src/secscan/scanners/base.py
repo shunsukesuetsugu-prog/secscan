@@ -13,11 +13,35 @@ This separation lets each Scanner stay a thin adapter, easy to test with a
 
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
 from ..models import ScanConfig, ScanOutcome, WorkUnit
 from ..runner import CommandRunner
+
+
+class DiffMode(enum.Enum):
+    """How a scanner behaves under ``secscan all --since <ref>`` (Phase 2-Y).
+
+    - ``NATIVE``: the scanner has a real differential mode and scans
+      only what changed since the baseline (secrets via gitleaks
+      ``git --log-opts``, sast via semgrep ``--baseline-commit``).
+    - ``ALWAYS``: the scanner runs a FULL scan even in diff mode,
+      because its finding set does not track file changes — e.g.
+      deps / supply, whose CVEs come from an advisory database that
+      can flag an *unchanged* dependency (Codex Phase 2-Y design
+      review #4). Gating these on "did the lockfile change?" would be
+      a false-negative trap.
+    - ``AGNOSTIC``: the scanner has no meaningful notion of a source
+      diff (external HTTP target, whole-image CVE scan, whole-tree IaC
+      policy). In diff mode it is SKIPPED with an explicit reason — it
+      is recorded as skipped, NOT as a clean pass.
+    """
+
+    NATIVE = "native"
+    ALWAYS = "always"
+    AGNOSTIC = "agnostic"
 
 
 class ToolNotFoundError(RuntimeError):
@@ -67,6 +91,13 @@ class Scanner(ABC):
     #: invoke ``docker run`` or otherwise contend for the local
     #: Docker daemon.
     requires_docker: ClassVar[bool] = False
+    #: How this scanner behaves under ``--since`` diff mode (Phase 2-Y).
+    #: Default ``AGNOSTIC`` (skipped in diff mode) — a scanner must opt
+    #: into NATIVE or ALWAYS deliberately, so a newly-added scanner that
+    #: forgets to declare its diff behaviour fails safe (skipped, with a
+    #: reason) rather than silently running a full scan that the operator
+    #: thought was a delta check.
+    diff_mode: ClassVar[DiffMode] = DiffMode.AGNOSTIC
 
     @abstractmethod
     def is_applicable(self, unit: WorkUnit) -> bool:

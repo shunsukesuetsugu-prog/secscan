@@ -283,3 +283,14 @@ class ScanConfig:
     Exposed as ``Mapping`` (read-only contract). Construction sites should
     pass either ``MappingProxyType({...})`` or an immutable mapping; the
     field itself does not enforce immutability beyond the type contract."""
+
+    diff_baseline_oid: str | None = None
+    """Phase 2-Y: when set, the scanner runs in differential mode against
+    this baseline commit OID. It is the merge-base of the operator's
+    ``--since`` ref and HEAD (computed and validated in ``diffscan.py``),
+    so it is always a clean hex object id — safe to embed verbatim in an
+    argv element like ``f"{oid}..HEAD"``. ``None`` means a full scan.
+
+    Only ``DiffMode.NATIVE`` scanners consume this; ``ALWAYS`` scanners
+    ignore it (they always run full) and ``AGNOSTIC`` scanners never see
+    a ``scan()`` call in diff mode (the orchestrator skips them)."""

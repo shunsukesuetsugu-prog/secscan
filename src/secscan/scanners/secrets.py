@@ -43,7 +43,7 @@ from ..models import (
 )
 from ..redact import REDACTED, redact_text, truncate
 from ..runner import CommandRunner, decode_output
-from .base import Scanner, ToolNotFoundError
+from .base import DiffMode, Scanner, ToolNotFoundError
 
 # Distinct exit code requested via --exit-code so we can tell "leaks found"
 # apart from gitleaks' own error path (default 1 for both).
@@ -60,6 +60,10 @@ class SecretsScanner(Scanner):
         "install gitleaks v8+ (e.g. `brew install gitleaks` on macOS) "
         "and ensure it is on PATH"
     )
+    # Phase 2-Y: gitleaks has a native git mode (``git
+    # --log-opts=<base>..HEAD``) that scans only the commits in a
+    # range — a true differential secret scan.
+    diff_mode = DiffMode.NATIVE
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # Secrets are language-agnostic; scan every WorkUnit.
@@ -84,16 +88,36 @@ class SecretsScanner(Scanner):
         tmp_dir = Path(tempfile.mkdtemp(prefix="secscan-gitleaks-"))
         os.chmod(tmp_dir, 0o700)
         report_path = tmp_dir / "report.json"
-        argv = [
-            "gitleaks",
-            "dir",
-            str(unit.root),
-            "--redact=100",
-            "--report-format=json",
-            f"--report-path={report_path}",
-            f"--exit-code={_GITLEAKS_LEAK_EXIT_CODE}",
-            "--no-banner",
-        ]
+        # Phase 2-Y: in diff mode, scan only the commit range via
+        # gitleaks' native git mode. ``diff_baseline_oid`` is a
+        # validated hex OID (diffscan.py guarantees the charset and
+        # that ``unit.root`` is the repository top level), so
+        # ``f"{oid}..HEAD"`` is a safe single argv token — no shell,
+        # no option prefix. Full mode keeps the ``dir`` scan of the
+        # working tree.
+        if config.diff_baseline_oid is not None:
+            argv = [
+                "gitleaks",
+                "git",
+                str(unit.root),
+                f"--log-opts={config.diff_baseline_oid}..HEAD",
+                "--redact=100",
+                "--report-format=json",
+                f"--report-path={report_path}",
+                f"--exit-code={_GITLEAKS_LEAK_EXIT_CODE}",
+                "--no-banner",
+            ]
+        else:
+            argv = [
+                "gitleaks",
+                "dir",
+                str(unit.root),
+                "--redact=100",
+                "--report-format=json",
+                f"--report-path={report_path}",
+                f"--exit-code={_GITLEAKS_LEAK_EXIT_CODE}",
+                "--no-banner",
+            ]
 
         try:
             result = runner.run(

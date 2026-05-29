@@ -146,6 +146,28 @@ def test_argv_includes_scan_path_explicitly(tmp_path: Path) -> None:
     assert str(tmp_path) in argv
 
 
+# --- Phase 2-Y: differential argv -----------------------------------------
+
+
+def test_argv_adds_baseline_commit_in_diff_mode(tmp_path: Path) -> None:
+    """When a baseline OID is given, semgrep gets --baseline-commit <oid>
+    so it reports only findings new since that commit."""
+    oid = "a" * 40
+    argv = semgrep_argv(
+        unit_root=tmp_path, configs=("p/python",), baseline_commit=oid
+    )
+    assert "--baseline-commit" in argv
+    bc_idx = argv.index("--baseline-commit")
+    # The OID is the very next token, as a single argv element.
+    assert argv[bc_idx + 1] == oid
+
+
+def test_argv_omits_baseline_commit_in_full_mode(tmp_path: Path) -> None:
+    """Default (no baseline) must NOT add --baseline-commit — a full scan."""
+    argv = semgrep_argv(unit_root=tmp_path, configs=("p/python",))
+    assert "--baseline-commit" not in argv
+
+
 # --- classify_semgrep_exit ------------------------------------------------
 
 

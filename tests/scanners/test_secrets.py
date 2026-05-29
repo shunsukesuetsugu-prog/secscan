@@ -580,3 +580,36 @@ def test_passes_scan_timeout_to_runner(
     assert scan_call[2] == 42
     # Version probe: fixed short timeout (10s in the implementation).
     assert version_call[2] == 10
+
+
+# --- Phase 2-Y: differential argv ------------------------------------------
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_full_mode_uses_gitleaks_dir(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    """Default (no diff baseline): the working-tree ``gitleaks dir`` scan."""
+    fake_runner.push(returncode=0, stdout=b"[]")
+    fake_runner.push(returncode=0, stdout=b"v8.18.0")
+    scanner.scan(work_unit, fake_runner, ScanConfig())
+    scan_argv = fake_runner.calls[0][0]
+    assert scan_argv[0] == "gitleaks"
+    assert scan_argv[1] == "dir"
+    assert not any(a.startswith("--log-opts=") for a in scan_argv)
+
+
+@pytest.mark.usefixtures("stub_which")
+def test_diff_mode_uses_gitleaks_git_log_opts(
+    scanner: SecretsScanner, fake_runner: FakeRunner, work_unit: WorkUnit
+) -> None:
+    """With a baseline OID: gitleaks git mode scoped to ``<oid>..HEAD``."""
+    oid = "a" * 40
+    fake_runner.push(returncode=0, stdout=b"[]")
+    fake_runner.push(returncode=0, stdout=b"v8.18.0")
+    scanner.scan(work_unit, fake_runner, ScanConfig(diff_baseline_oid=oid))
+    scan_argv = fake_runner.calls[0][0]
+    assert scan_argv[0] == "gitleaks"
+    assert scan_argv[1] == "git"
+    # The range is a single argv token (no shell, OID validated upstream).
+    assert f"--log-opts={oid}..HEAD" in scan_argv

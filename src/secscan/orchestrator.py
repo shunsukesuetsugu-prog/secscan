@@ -45,6 +45,7 @@ from .baseline import (
     load_baseline,
 )
 from .config import ProjectConfig
+from .diffscan import DiffBaseline
 from .discovery import discover_for_scanner
 from .models import (
     Finding,
@@ -58,7 +59,7 @@ from .path_safety import ResolvedRoot
 from .policy import PolicyDecision, apply_overrides, evaluate
 from .redact import redact_text, truncate
 from .runner import CommandRunner
-from .scanners.base import Scanner, ToolNotFoundError
+from .scanners.base import DiffMode, Scanner, ToolNotFoundError
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,7 @@ def run_scanners(
     parallel: bool = True,
     max_workers: int | None = None,
     docker_max_workers: int = DEFAULT_DOCKER_MAX_WORKERS,
+    diff_baseline: DiffBaseline | None = None,
 ) -> OrchestratorResult:
     """Execute the requested scanners and aggregate results.
 
@@ -240,8 +242,8 @@ def run_scanners(
     atexit hook will then wait for any non-daemon executor worker
     threads to finish their in-flight subprocess before the CLI
     process actually exits. Operators who need immediate SIGINT
-    responsiveness should run with ``--no-parallel`` until Phase
-    2-Y adds runner-level subprocess termination.
+    responsiveness should run with ``--no-parallel`` until a future
+    phase adds runner-level subprocess termination.
     """
     if max_workers is not None and max_workers < 1:
         raise ValueError(f"max_workers must be >= 1, got {max_workers}")
@@ -271,6 +273,30 @@ def run_scanners(
     discovery_warnings: list[tuple[int, tuple[str, ...]]] = []
     for sidx, scanner in enumerate(selected):
         scan_config = _scan_config_for(scanner.name, config)
+
+        # Phase 2-Y: diff-mode dispatch. AGNOSTIC scanners are skipped
+        # (recorded as skipped with a reason, NOT a clean pass — Codex
+        # Phase 2-Y design review #5). NATIVE scanners get the baseline
+        # OID injected so they run a true delta scan. ALWAYS scanners
+        # (deps/supply) keep the full ScanConfig — their finding set
+        # tracks an advisory DB, not the source diff.
+        if diff_baseline is not None:
+            if scanner.diff_mode is DiffMode.AGNOSTIC:
+                skipped.append(scanner.name)
+                warnings.append(
+                    f"{scanner.name}: skipped in --since diff mode — this "
+                    "scanner is not diff-aware (it targets an external "
+                    "service or scans the whole tree/image, not a source "
+                    "delta). Run a full scan (omit --since) to include it."
+                )
+                continue
+            if scanner.diff_mode is DiffMode.NATIVE:
+                scan_config = dc_replace(
+                    scan_config,
+                    diff_baseline_oid=diff_baseline.baseline_oid,
+                )
+            # DiffMode.ALWAYS: leave scan_config untouched (full scan).
+
         discovery = discover_for_scanner(scanner.name, scan_root)
         discovery_warnings.append((sidx, tuple(discovery.warnings)))
 
@@ -387,6 +413,43 @@ def run_scanners(
         kept = application.kept
         suppressed = application.suppressed
         warnings.extend(application.warnings)
+
+    # Phase 2-Y banner. The banner MUST distinguish per-scanner
+    # behaviour (Codex design review #6) AND reflect what ACTUALLY ran
+    # (Codex diff review #3): if the operator did ``--skip secrets``,
+    # the banner must not claim secrets was delta-scanned. We build the
+    # clauses from ``scanned`` (what ran) and the scanner modes, so a
+    # partial diff never reads as fully covered.
+    if diff_baseline is not None:
+        mode_by_name = {s.name: s.diff_mode for s in selected}
+        delta_scanned = sorted(
+            n for n in scanned if mode_by_name.get(n) is DiffMode.NATIVE
+        )
+        full_scanned = sorted(
+            n for n in scanned if mode_by_name.get(n) is DiffMode.ALWAYS
+        )
+        clauses: list[str] = []
+        if delta_scanned:
+            clauses.append(
+                f"{', '.join(delta_scanned)} scanned only the commit delta"
+            )
+        if full_scanned:
+            clauses.append(
+                f"{', '.join(full_scanned)} ran a FULL scan (advisory DB, "
+                "not file changes)"
+            )
+        body = "; ".join(clauses) if clauses else "no diff-aware scanner ran"
+        tail = (
+            " This is a DELTA check — unchanged files were NOT scanned by "
+            "the delta scanners."
+            if delta_scanned
+            else ""
+        )
+        warnings.insert(
+            0,
+            f"DIFF SCAN since {diff_baseline.user_ref} "
+            f"(baseline {diff_baseline.baseline_oid[:12]}): {body}.{tail}",
+        )
 
     result = RunResult(
         findings=kept,

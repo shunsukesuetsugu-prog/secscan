@@ -33,7 +33,7 @@ from ...models import (
 )
 from ...redact import redact_text, truncate
 from ...runner import CommandRunner, decode_output
-from ..base import Scanner, ToolNotFoundError
+from ..base import DiffMode, Scanner, ToolNotFoundError
 from ._pinned import DEFAULT_COSIGN_IMAGE
 from .cosign import (
     CosignVerification,
@@ -85,6 +85,11 @@ class SupplyScanner(Scanner):
     # the daemon. The cost when ``verify_images`` is empty is one
     # Semaphore slot held briefly — negligible.
     requires_docker = True
+    # Phase 2-Y: supply-chain integrity (cosign signature state +
+    # lockfile self-consistency) does not track source diffs — a
+    # signature can be revoked or a lockfile advisory can change
+    # without any file in the diff. Always run full in diff mode.
+    diff_mode = DiffMode.ALWAYS
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         return True

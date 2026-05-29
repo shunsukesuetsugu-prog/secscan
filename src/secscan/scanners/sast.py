@@ -48,7 +48,7 @@ from ..models import (
 )
 from ..redact import redact_text, truncate
 from ..runner import CommandResult, CommandRunner, decode_output
-from .base import Scanner, ToolNotFoundError
+from .base import DiffMode, Scanner, ToolNotFoundError
 
 # Severity strings used by semgrep CE.
 _SEMGREP_SEVERITY_MAP = {
@@ -84,6 +84,9 @@ class SastScanner(Scanner):
         "install semgrep (`pip install semgrep` or "
         "`pip install 'secscan[sast]'`) and ensure it is on PATH"
     )
+    # Phase 2-Y: semgrep's ``--baseline-commit`` reports only findings
+    # introduced since the baseline commit — a true differential SAST scan.
+    diff_mode: ClassVar[DiffMode] = DiffMode.NATIVE
 
     def is_applicable(self, unit: WorkUnit) -> bool:
         # semgrep is language-aware via its rulesets; we let it decide and
@@ -132,7 +135,11 @@ class SastScanner(Scanner):
         # actually about to invoke semgrep.
         configs = tuple(_expand_bundled_sentinels(configs))
 
-        argv = semgrep_argv(unit_root=unit.root, configs=configs)
+        argv = semgrep_argv(
+            unit_root=unit.root,
+            configs=configs,
+            baseline_commit=config.diff_baseline_oid,
+        )
         result = runner.run(
             argv, cwd=unit.root, timeout_seconds=config.timeout_seconds
         )
@@ -170,6 +177,7 @@ def semgrep_argv(
     *,
     unit_root: Path,
     configs: Sequence[str],
+    baseline_commit: str | None = None,
 ) -> tuple[str, ...]:
     """Build the semgrep CLI invocation.
 
@@ -181,10 +189,17 @@ def semgrep_argv(
     We do NOT pass ``--error``. semgrep's default ``scan`` exit code is 0
     even when findings are present; secscan's policy layer makes the
     threshold call, not the tool.
+
+    Phase 2-Y: when ``baseline_commit`` is set, ``--baseline-commit
+    <oid>`` makes semgrep report ONLY findings introduced since that
+    commit (a differential SAST scan). ``baseline_commit`` is a
+    validated hex OID (diffscan.py), safe as a single argv token.
     """
     argv: list[str] = ["semgrep", "scan", "--json", "--quiet"]
     for cfg in configs:
         argv.extend(("--config", cfg))
+    if baseline_commit is not None:
+        argv.extend(("--baseline-commit", baseline_commit))
     argv.append(str(unit_root))
     return tuple(argv)
 

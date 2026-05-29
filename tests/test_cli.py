@@ -994,3 +994,76 @@ def test_baseline_list_rejects_malformed_baseline(
 # two together. That coupled the test suite to a private implementation
 # detail; ``test_no_baseline_disables_baseline`` now drives accept-then-
 # rerun end-to-end instead.
+
+
+# --- Phase 2-Y: --since wiring ---------------------------------------------
+
+
+def test_all_since_invalid_ref_is_scan_error(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A DiffScanError from baseline resolution must surface as SCAN_ERROR
+    with the actionable message — never a traceback or silent exit 0."""
+    from secscan import diffscan
+
+    def _raise(ref: str, *, scan_root: object, runner: object) -> object:
+        raise diffscan.DiffScanError("--since ref 'nope' is not a known git commit")
+
+    monkeypatch.setattr(diffscan, "resolve_diff_baseline", _raise)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    rc = cli.main(["all", "--path", str(project), "--since", "nope"])
+    streams = capsys.readouterr()
+    assert rc == int(ExitCode.SCAN_ERROR)
+    # _print_error writes to stderr.
+    assert "diff scan" in streams.err
+    assert "not a known git commit" in streams.err
+
+
+def test_all_since_passes_ref_to_resolver_and_runs_diff(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted_runner: _ScriptedRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--since <ref> must reach the resolver verbatim, and a successful
+    resolution must drive a diff-mode run (banner present)."""
+    from secscan import diffscan
+    from secscan.diffscan import DiffBaseline
+
+    captured: dict[str, object] = {}
+
+    def _spy(ref: str, *, scan_root: object, runner: object) -> DiffBaseline:
+        captured["ref"] = ref
+        return DiffBaseline(user_ref=ref, baseline_oid="a" * 40)
+
+    monkeypatch.setattr(diffscan, "resolve_diff_baseline", _spy)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    # Narrow to secrets only so the run is deterministic: sast/supply are
+    # skipped via config, deps has no manifest in a bare project, and the
+    # AGNOSTIC scanners are diff-skipped. secrets (NATIVE) runs in diff
+    # mode (gitleaks git): no leaks + version probe.
+    scripted_runner.queue(returncode=0, stdout=b"[]")
+    scripted_runner.queue(returncode=0, stdout=b"v8")
+    rc = cli.main(
+        [
+            "all",
+            "--path",
+            str(project),
+            "--since",
+            "release-1.0",
+            "--skip",
+            "sast",
+            "--skip",
+            "supply",
+            "--no-parallel",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert captured["ref"] == "release-1.0"
+    # The diff banner is surfaced to the operator.
+    assert "DIFF SCAN since release-1.0" in out
+    # Clean diff scan with secrets running exits OK.
+    assert rc == int(ExitCode.OK)

@@ -156,6 +156,21 @@ def _build_parser() -> argparse.ArgumentParser:
                     "--no-parallel. Must be >= 1."
                 ),
             )
+            # Phase 2-Y: differential scanning.
+            sub.add_argument(
+                "--since",
+                default=None,
+                metavar="REF",
+                help=(
+                    "differential scan: report only what changed since git "
+                    "<REF>. Requires a CLEAN working tree and that --path is "
+                    "the repository root. secrets/sast run true delta scans; "
+                    "deps/supply run FULL (their CVEs come from an advisory "
+                    "DB, not file changes); dast/image/apifuzz/config/sbom "
+                    "are SKIPPED. This is a delta check, NOT a full audit — "
+                    "unchanged files are not scanned by secrets/sast."
+                ),
+            )
         if cmd == "config":
             sub.add_argument(
                 "--trivy-image",
@@ -839,6 +854,24 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             f"--max-workers must be >= 1, got {max_workers}"
         )
         return int(ExitCode.SCAN_ERROR)
+
+    # Phase 2-Y: resolve the diff baseline when --since was given. This
+    # validates all diff-mode preconditions (repo-root, clean worktree,
+    # ref resolves) and normalises to a merge-base OID. A DiffScanError
+    # is a usage problem → SCAN_ERROR with the actionable message.
+    diff_baseline = None
+    since_ref = getattr(args, "since", None)
+    if since_ref is not None:
+        from .diffscan import DiffScanError, resolve_diff_baseline
+
+        try:
+            diff_baseline = resolve_diff_baseline(
+                since_ref, scan_root=scan_root.resolved, runner=runner
+            )
+        except DiffScanError as exc:
+            _print_error(f"diff scan: {exc}")
+            return int(ExitCode.SCAN_ERROR)
+
     try:
         outcome = run_scanners(
             scanners,
@@ -848,6 +881,7 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             only=only,
             parallel=parallel,
             max_workers=max_workers,
+            diff_baseline=diff_baseline,
         )
     except BaselineError as exc:
         # We surface baseline errors at this level (parse failures during
@@ -872,10 +906,34 @@ def _dispatch_scan(args: argparse.Namespace) -> int:
             ),
         )
 
+    # Phase 2-Y (Codex design review #6): if --since selected ZERO
+    # diff-aware scanners that actually ran (e.g. the user combined
+    # --since with a --skip set that removed secrets/sast/deps/supply,
+    # leaving only AGNOSTIC scanners), that is an inconclusive scan, not
+    # a clean one. Fail loudly rather than exit 0 on an empty delta.
+    diff_zero_runnable = (
+        diff_baseline is not None and not final_result.scanned_scanners
+    )
+    if diff_baseline is not None and diff_zero_runnable:
+        from dataclasses import replace as _replace
+
+        final_result = _replace(
+            final_result,
+            warnings=(
+                *final_result.warnings,
+                f"diff scan (--since {diff_baseline.user_ref}): no diff-aware "
+                "scanner ran. Every selected scanner is skipped in diff mode "
+                "(secrets/sast/deps/supply support --since; "
+                "dast/image/apifuzz/config/sbom do not). Nothing was checked.",
+            ),
+        )
+
     # When ``all`` is partial, we must not exit 0 on findings==0. The user
     # asked for "everything" and got "subset"; that's an inconclusive scan
-    # for CI purposes, not a clean one.
-    if missing_for_all and outcome.decision.exit_code == ExitCode.OK:
+    # for CI purposes, not a clean one. Same logic for a zero-runnable diff.
+    if (missing_for_all or diff_zero_runnable) and (
+        outcome.decision.exit_code == ExitCode.OK
+    ):
         from dataclasses import replace as _replace
 
         final_decision = _replace(outcome.decision, exit_code=ExitCode.SCAN_ERROR)
